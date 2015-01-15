@@ -1,0 +1,128 @@
+// Microsoft Visual C++ generated resource script.
+//
+#include "resource.h"
+
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#include "afxres.h"
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+// English (U.S.) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+#ifdef _WIN32
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+#pragma code_page(1252)
+#endif //_WIN32
+
+#ifdef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// TEXTINCLUDE
+//
+
+1 TEXTINCLUDE 
+BEGIN
+    "resource.h\0"
+END
+
+2 TEXTINCLUDE 
+BEGIN
+    "#include ""afxres.h""\r\n"
+    "\0"
+END
+
+3 TEXTINCLUDE 
+BEGIN
+    "\r\n"
+    "\0"
+END
+
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Dialog
+//
+
+IDD_CS_CONFIGVIEW DIALOGEX 0, 0, 330, 294
+STYLE DS_SETFONT | WS_CHILD
+FONT 8, "MS Sans Serif", 0, 0, 0x0
+BEGIN
+    LTEXT           "Server Port :",IDC_STATIC,21,34,58,8,SS_CENTERIMAGE
+    EDITTEXT        IDC_SERVERPORT,85,34,65,12,ES_AUTOHSCROLL
+    GROUPBOX        "Control Server Options",IDC_STATIC,7,7,316,280
+    LTEXT           "Changes to the 'Connection Options' will not take affect until the server is disabled/enabled.",IDC_STATIC,14,215,301,9
+    LTEXT           "Fields :",IDC_STATIC,21,108,23,12,SS_CENTERIMAGE
+    EDITTEXT        IDC_METAFIELDS,49,108,260,12,ES_AUTOHSCROLL
+    CONTROL         "Server Enabled",IDC_SERVERENABLED,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,158,34,65,16
+    CONTROL         "UTF-8 Output/Input",IDC_UTF8OUTPUT,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,21,147,89,12
+    LTEXT           "If 'UTF-8 Output/Input' is not checked the output and input will be converted to lower ASCII with non valid characters replaced by the '?' symbol.",IDC_STATIC,14,231,302,18
+    LTEXT           "Number of Clients :",IDC_STATIC,21,50,61,9,SS_CENTERIMAGE
+    GROUPBOX        "Connection Options",IDC_STATIC,14,21,302,65
+    LTEXT           "Allow Addresses :",IDC_STATIC,21,66,58,12,SS_CENTERIMAGE
+    EDITTEXT        IDC_CONNECTIONMASK,85,66,224,12,ES_AUTOHSCROLL
+    GROUPBOX        "Output Options",IDC_STATIC,14,93,302,74
+    EDITTEXT        IDC_MAXCLIENTS,85,50,65,12,ES_AUTOHSCROLL
+    LTEXT           "Base Delimiter:",IDC_STATIC,158,147,54,12,SS_CENTERIMAGE
+    EDITTEXT        IDC_DELIMIT,216,147,42,12,ES_AUTOHSCROLL
+    EDITTEXT        IDC_PREVIEW,28,128,280,12,ES_AUTOHSCROLL | ES_READONLY,WS_EX_CLIENTEDGE
+    GROUPBOX        "General Options",IDC_STATIC,14,174,302,31
+    CONTROL         "Prevent clients from closing Foobar2000",IDC_PREVENTCLOSE,
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,21,187,142,10
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// DESIGNINFO
+//
+
+#ifdef APSTUDIO_INVOKED
+GUIDELINES DESIGNINFO 
+BEGIN
+    IDD_CS_CONFIGVIEW, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 323
+        VERTGUIDE, 14
+        VERTGUIDE, 21
+        VERTGUIDE, 158
+        VERTGUIDE, 316
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 287
+        HORZGUIDE, 7
+        HORZGUIDE, 21
+        HORZGUIDE, 34
+        HORZGUIDE, 50
+        HORZGUIDE, 66
+        HORZGUIDE, 108
+        HORZGUIDE, 128
+        HORZGUIDE, 147
+        HORZGUIDE, 287
+    END
+END
+#endif    // APSTUDIO_INVOKED
+
+#endif    // English (U.S.) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+
+/////////////////////////////////////////////////////////////////////////////
+#endif    // not APSTUDIO_INVOKED
+
