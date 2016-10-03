@@ -1650,6 +1650,7 @@ controlserver::handleHelpCommand(SOCKET clientSocket, bool verbose)
         "999" << m_delimit << "trackinfo                                              - info about the current track" << m_delimit << "\r\n" <<
         "999" << m_delimit << "vol [#]|['up']|['down']|['mute']                       - get/set volume dB or up/down 0.50 dB or mute" << m_delimit << "\r\n" <<
         "999" << m_delimit << "order [type]                                           - get/set order type [default|random|repeatplaylist|repeattrack|shuffletrack|shufflealbum|shufflefolder]" << m_delimit << "\r\n" <<
+		"999" << m_delimit << "listmod add <name>                                     - create a new playlist" << m_delimit << "\r\n" <<
         "999" << m_delimit << "queue [[playlist#] <track#>]                           - queue track from playlist or view queue" << m_delimit << "\r\n" <<
         "999" << m_delimit << "queue del <index#>|<'all'>                             - delete queue index item from queue or clear all queue" << m_delimit << "\r\n";
         
@@ -1677,6 +1678,7 @@ controlserver::handleHelpCommand(SOCKET clientSocket, bool verbose)
         "999" << m_delimit << "trackinfo" << m_delimit << "\r\n" <<
         "999" << m_delimit << "vol [#]|['up']|['down']|['mute']" << m_delimit << "\r\n" <<
         "999" << m_delimit << "order ['default'|'random'|'repeatplaylist'|'repeattrack'|'shuffletrack'|'shufflealbum'|'shufflefolder']" << m_delimit << "\r\n" <<
+		"999" << m_delimit << "listmod add <name>"<< m_delimit << "\r\n" <<
         "999" << m_delimit << "queue [[playlist#] <track#>]" << m_delimit << "\r\n" <<
         "999" << m_delimit << "queue del <index#>|<'all'>" << m_delimit << "\r\n";
 
@@ -2171,11 +2173,66 @@ controlserver::handleSeekTrackCommand(SOCKET clientSocket, pfc::string8 recvComm
 void
 controlserver::handleListModCommand(SOCKET clientSocket, pfc::string8 recvCommand)
 {
+	char delim[] = " ";
 	pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
 	pfc::string8 msg;
+	static_api_ptr_t<playlist_manager> plm;
+
+	enum ModType {add, del};
+	ModType type;
+
+	// strip off end of lines
+	recvCommand.truncate_eol();
+
+	// strip off the "listmod " part
+	char* f = strtok((char*)recvCommand.get_ptr(), delim);
+
+	if (f == NULL)
+	{
+		return;
+	}
+
+	if (strlen(f) != 7)
+	{
+		return;
+	}
 
 	msg << "foo_controlserver: client from " << clientAddress << " issued a listmod command";
 	console::info(msg);
+
+	f = strtok(NULL, delim);
+	if (strncmp(f, "add", 3) == 0 && strlen(f) == 3) type = ModType::add;
+	else if (strncmp(f, "del", 3) == 0 && strlen(f) == 3) type = ModType::del;
+	else
+	{
+		pfc::string8 msg;
+
+		msg << "999" << m_delimit << "Invalid listmod option '" << f << "', try del or add" << m_delimit << "\r\n";
+		sendData(clientSocket, msg);
+
+		return;
+	}
+
+	switch (type)
+	{
+	case add:
+		f = strtok(NULL, delim);
+		if(f != NULL)
+		{
+			int listIndex = plm->create_playlist(f, 128, SIZE_MAX);
+
+			pfc::string8 msg;
+			msg << "listinfo " << listIndex;
+
+			static_api_ptr_t<main_thread_callback_manager> cm;
+			cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::listinfo, clientSocket, msg));
+		}
+		break;
+	case del:
+		break;
+	default:
+		break;
+	}
 }
 
 // handle a track info command
