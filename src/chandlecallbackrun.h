@@ -29,7 +29,7 @@ class CHandleCallbackRun : public main_thread_callback
 public:
     enum CallbackType { trackupdatefromptr, trackupdateonconnect, play, listinfo, \
                         search, order, trackinfo, inittrackers, volumeset, list, \
-                        queue, next, prev, rand, stop, pause, seek, volumechange };
+                        queue, next, prev, rand, stop, pause, seek, volumechange, listmod };
 
     CHandleCallbackRun(CallbackType);
     CHandleCallbackRun(CallbackType, SOCKET);

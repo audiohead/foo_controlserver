@@ -2167,6 +2167,17 @@ controlserver::handleSeekTrackCommand(SOCKET clientSocket, pfc::string8 recvComm
     }
 }
 
+// Handle a modify playlist command
+void
+controlserver::handleListModCommand(SOCKET clientSocket, pfc::string8 recvCommand)
+{
+	pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
+	pfc::string8 msg;
+
+	msg << "foo_controlserver: client from " << clientAddress << " issued a listmod command";
+	console::info(msg);
+}
+
 // handle a track info command
 void
 controlserver::handleTrackInfoCommand(SOCKET clientSocket)
@@ -2453,6 +2464,11 @@ WINAPI controlserver::ClientThread(void* cs)
                     cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::volumeset, clientSocket, recvCommand));
                 } else
 
+				if (strncmp(recvCommand, "listmod", 7) == 0)
+				{
+					cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::listmod, clientSocket, recvCommand));
+				} else
+
                 if (strncmp(recvCommand, "list", 4) == 0)
                 {
                     cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::list, clientSocket, recvCommand));
@@ -2508,7 +2524,7 @@ WINAPI controlserver::ClientThread(void* cs)
                 if (strncmp(recvCommand, "seek", 4) == 0)
                 {
                     cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::seek, clientSocket, recvCommand));
-                }
+                } 
 
                 // clear command, or junk line with linefeed/cr
                 recvCommand = "";
