@@ -62,6 +62,7 @@ public:
     static void handleSearchCommand(SOCKET, pfc::string8);
     static void handleQueueTrackCommand(SOCKET, pfc::string8);
     static void handleSeekTrackCommand(SOCKET, pfc::string8);
+	static void handleListModCommand(SOCKET, pfc::string8);
 
     static void start(int, HANDLE);
     static void handleDelimitStringChange(pfc::string8 const&); // thread safe?

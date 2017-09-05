@@ -134,6 +134,9 @@ CHandleCallbackRun::callback_run()
     case volumechange:
         controlserver::handleVolumeChange(m_vol);
         break;
+	case listmod:
+		controlserver::handleListModCommand(m_sock, m_str);
+		break;
     default:
         break;
     };
