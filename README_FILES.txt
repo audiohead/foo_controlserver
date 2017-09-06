@@ -14,4 +14,4 @@ A summary of the contents is as follows:
 \README_FILES.txt            this document
 \README.txt                  overview, links to install, version history
 
-
+\foo_controlserver_vs2015_build_notes.pdf   notes on how to build foo_controlserver
