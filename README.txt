@@ -41,7 +41,7 @@ in the archive.
 
 ------------------------------------------------------------
 
-Version History:
+VERSION HISTORY:
 
 >> foo_controlserver Version 1.0.2 - original baseline version by Jason Poloski 
 
