@@ -16,6 +16,9 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ *
+ * Nov 2016 - added album art, library search functions - Walter Hartman
+ *
  */
 
 #include "chandlecallbackrun.h"
@@ -92,8 +95,11 @@ CHandleCallbackRun::callback_run()
     case listinfo:
         controlserver::handleListInfoCommand(m_sock, m_str);
         break;
-    case search:
-        controlserver::handleSearchCommand(m_sock, m_str);
+	case albumart:
+		controlserver::handleAlbumArtCommand(m_sock);
+		break;
+    case libsearch:
+        controlserver::handleLibSearchCommand(m_sock, m_str);
         break;
     case order:
         controlserver::handleOrderCommand(m_sock, m_str);

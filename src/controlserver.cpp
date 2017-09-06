@@ -16,12 +16,17 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ *
+ * Nov 2016 - added album art, library search functions - Walter Hartman
+ *
  */
 
 #include "controlserver.h"
 #include "chandlecallbackrun.h"
 
-pfc::string8 const controlserver::m_versionNumber = "1.0.2";
+#include "debug.h"
+
+pfc::string8 const controlserver::m_versionNumber = "1.1.3";
 std::vector<SOCKET> controlserver::m_vclientSockets;
 HANDLE controlserver::m_WSAendEvent = NULL;
 pfc::string8 controlserver::m_metafields;
@@ -37,6 +42,7 @@ metadb_handle_ptr controlserver::m_prevTrackPtr;
 metadb_handle_ptr controlserver::m_currTrackPtr;
 t_size controlserver::m_utf8Output = false;
 t_size controlserver::m_preventClose = true;
+albumart controlserver::m_albumart;
 
 // constructor
 controlserver::controlserver()
@@ -49,6 +55,7 @@ controlserver::~controlserver()
 {
 
 };
+
 
 bool
 controlserver::convertFromWide(pfc::string8 const& incoming, pfc::string8& output)
@@ -341,6 +348,21 @@ controlserver::initTrackers()
     m_prevTrackIndex = m_currTrackIndex;
 }
 
+pfc::string8 controlserver::generateNowPlayingTrackString()
+{
+	static_api_ptr_t<play_control> pc;
+	metadb_handle_ptr pb_item_ptr;
+	pfc::string8 str = "";
+
+	if (pc->get_now_playing(pb_item_ptr))
+	{
+		generateTrackString(pb_item_ptr, str, false);
+	}
+	return str;
+}
+
+// mod playlist # pos if not found use -1 -1 rest correct, copilot if it sees -1 -1 knows not in
+// playlist
 // song updated, notify a single client
 void
 controlserver::handleTrackUpdateOnConnect(SOCKET clientSocket)
@@ -349,27 +371,58 @@ controlserver::handleTrackUpdateOnConnect(SOCKET clientSocket)
     static_api_ptr_t<playlist_manager> plm;
     pfc::string8 sendStr;           // string we are going to send
 
-    if (m_currTrackIndex == -1)
-    {
-        return;
-    }
+	static_api_ptr_t<play_control> pc;
+	metadb_handle_ptr pb_item_ptr;
 
-    plm->playlist_get_item_handle(handlept, m_currPlaylistIndex, m_currTrackIndex);
+	t_size pb_item = pfc::infinite_size;
+	t_size pb_playlist = pfc::infinite_size;
 
-    if (handlept == NULL)
+	if (pc->get_now_playing(pb_item_ptr))
+	{
+		plm->get_playing_item_location(&pb_playlist, &pb_item);  // returns playlist # and index to playing
+		
+		m_currPlaylistIndex = pb_playlist;
+		m_currTrackIndex = pb_item;
+		
+	}
+    //plm->playlist_get_item_handle(handlept, m_currPlaylistIndex, m_currTrackIndex);
+
+    if (pb_item_ptr == NULL) // no track playing
     {
-        sendStr << "116" << m_delimit << m_currPlaylistIndex
-                << m_delimit << m_currTrackIndex+1
-                << m_delimit << "Track no longer exists in playlist" << m_delimit << "\r\n";
-    }
+		// try to extract from playlist
+		plm->playlist_get_item_handle(handlept, m_currPlaylistIndex, m_currTrackIndex);
+
+		if (handlept == NULL)  // not in playlist either
+		{
+			sendStr << "116" << m_delimit << m_currPlaylistIndex
+				<< m_delimit << m_currTrackIndex + 1
+				<< m_delimit << "Track no longer exists in playlist" << m_delimit << "\r\n";
+		}
+		else
+		{
+			calculateTrackStateHeader(sendStr, 0);
+			sendStr << m_delimit << m_currPlaylistIndex;
+			if (m_currTrackIndex == pfc::infinite_size)
+				sendStr << m_delimit << m_currTrackIndex << m_delimit;
+			else
+				sendStr << m_delimit << m_currTrackIndex + 1 << m_delimit;
+
+			// fill in string with track information from playlist
+			generateTrackString(handlept, sendStr, true);
+
+		}
+	}
     else
     {
         calculateTrackStateHeader(sendStr, 0);
         sendStr << m_delimit << m_currPlaylistIndex;
-        sendStr << m_delimit << m_currTrackIndex+1 << m_delimit;
+		if (m_currTrackIndex == pfc::infinite_size)
+			sendStr << m_delimit << m_currTrackIndex << m_delimit;
+		else
+			sendStr << m_delimit << m_currTrackIndex + 1 << m_delimit;
 
-        // fill in string with track information
-        generateTrackString(handlept, sendStr, true);
+        // fill in string with playing track information
+        generateTrackString(pb_item_ptr, sendStr, true);
     }
 
     // now send the response to the single client
@@ -400,7 +453,7 @@ controlserver::handleTrackUpdateFromPtr(metadb_handle_ptr p_track)
     static_api_ptr_t<playlist_manager> plm;
     t_size playlistIndex = 0;
     t_size trackIndex = 0;
-
+	
     if (plm->get_playing_item_location(&playlistIndex, &trackIndex))
     {
         m_currPlaylistIndex = playlistIndex;
@@ -516,9 +569,11 @@ controlserver::handleQueueTrackCommand(SOCKET clientSocket, pfc::string8 recvCom
         return;
     }
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a queue command";
-    console::info(msg);
-
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a queue command";
+		console::info(msg);
+	}
     while (f != NULL)
     {
         f = strtok(NULL, delim);
@@ -671,167 +726,261 @@ controlserver::handleQueueTrackCommand(SOCKET clientSocket, pfc::string8 recvCom
     sendData(clientSocket, msg);
 }
 
-void
-controlserver::handleSearchCommand(SOCKET clientSocket, pfc::string8 recvCommand)
+void controlserver::handleLibSearchCommand(SOCKET clientSocket, pfc::string8 recvCommand)
 {
-    char delim[] = " ";
-    pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
-    pfc::string8 msg;
-    pfc::string8 searchFor;
-    pfc::string8 foundItems;
-    pfc::string8 sendStr;
-    t_size argCount = 0;
-    t_size index1 = 0;
-    bool convertBad = false;
-    static_api_ptr_t<playlist_manager> plm;
-    static_api_ptr_t<play_control> pbc;
-    t_size playlistIndex = m_currPlaylistIndex;
-    metadb_handle_list list;
-    unsigned int foundNumItems = 0;
+	pfc::string8 msg;
+	pfc::string8 playlistName;
+	pfc::string8 searchFor;
+	char delim[] = "'";
+	t_size argCount = 0;
 
-    // strip off end of lines
-    recvCommand.truncate_eol();
+	t_size playlist;
+	t_size playlist_item_count;
 
-    // strip off the "search " part
-    char* f = strtok((char*)recvCommand.get_ptr(), delim);
+	static_api_ptr_t<autoplaylist_manager> apm;
+	static_api_ptr_t<playlist_manager> plm;
 
-    if (f == NULL)
-    {
-        return;
-    }
+	pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
 
-    if (strlen(f) != 6)
-    {
-        return;
-    }
+	// strip off end of lines
+	recvCommand.truncate_eol();
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a search command";
-    console::info(msg);
+	// Command form : libsearch 'playlist name' 'string'
+	// strings are quoted since can have spaces
 
-    while (f != NULL)
-    {
-        f = strtok(NULL, delim);
+	int len = recvCommand.get_length();
+	if (len < 11)
+	{
+		// no playlist name or search string
+		msg << "999" << m_delimit << "Invalid number of arguments" << m_delimit << "\r\n";
+		sendData(clientSocket, msg);
+		return;
+	}
 
-        if (f != NULL)
-        {
-            switch(argCount)
-            {
-            case 0:
-                {
-                    // store this just in case we only have one arg
-                    // and this is our search
-                    searchFor = f;
+	char* f = strtok((char*)recvCommand.get_ptr(), delim);
 
-                    if (!convertStrToI(f, index1))
-                    {
-                        convertBad = true;
-                    }
+	while (f != NULL)
+	{
+		f = strtok(NULL, delim);
 
-                    argCount++;
-                }
-                break;
-            case 1:
-                {
-                    if (!convertBad)
-                    {
-                        searchFor = f;
-                    }
-                    else
-                    {
-                        pfc::string8 temp = f;
+		if (f != NULL)
+		{
+			switch (argCount)
+			{
+			case 0:
+				// extract playlist name to be created or overwritten
+				playlistName = f;
+				break;
 
-                        searchFor += " ";
-                        searchFor += temp;
-                    }
+			case 1: // skip space between
+				break;
 
-                    argCount++;
-                }
-                break;
-            default :
-                {
-                    pfc::string8 temp = f;
+			case 2:
+				// extract search string
+				searchFor = f;
+				break;
 
-                    searchFor += " ";
-                    searchFor += temp;
-                }
-            }
-        }
-    }
+			default:
+				break;
 
-    if (argCount == 2)
-    {
-        if (!convertBad)
-        {
-            playlistIndex = index1;
-        }
-    }
-    else if (argCount == 0 || argCount > 2)
-    {
-        pfc::string8 msg;
+			}
+		}
 
-        msg << "999" << m_delimit << "Invalid number of arguments" << m_delimit << "\r\n";
-        sendData(clientSocket, msg);
+		argCount++;
+	}
 
-        return;
-    }
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued libsearch " << "'" << playlistName << "'   " << "'" << searchFor << "'";
+		console::info(msg);
+	}
 
-    if (!(playlistIndex>=0 && playlistIndex<plm->get_playlist_count()))
-    {
-        pfc::string8 msg;
+	playlist = plm->find_or_create_playlist(playlistName.toString(), pfc::infinite_size);
 
-        msg << "999" << m_delimit << "Playlist index out of range" << m_delimit << "\r\n";
-        sendData(clientSocket, msg);
+	if (playlist != pfc::infinite_size)
+	{
+		plm->set_active_playlist(playlist);
 
-        return;
-    }
+		if (apm->is_client_present(playlist))
+			apm->remove_client(playlist);
 
-    plm->playlist_get_all_items(playlistIndex, list);
+		if (searchFor.get_length())
+		{
+			plm->playlist_undo_backup(playlist);
 
-    // nothing to list, playlist is empty
-    if (list.get_count() == 0)
-    {
-        pfc::string8 str;
+			try
+			{
+				apm->add_client_simple(searchFor.toString(), "%artist%|%album%|%discnumber%|%tracknumber%|%%title%", playlist, true);
+			}
+			catch (pfc::exception &e)
+			{
+				console::error(e.what());
+			}
 
-        str << "999" << m_delimit << playlistIndex << m_delimit
-            << "Playlist contains zero entries" << m_delimit << "\r\n";
+			if (apm->is_client_present(playlist))
+				apm->remove_client(playlist);
+		}
 
-        sendData(clientSocket, str);
+		if (playlist != pfc::infinite_size)
+			playlist_item_count = plm->playlist_get_item_count(playlist);
+		else
+			playlist_item_count = pfc::infinite_size;
 
-        return;
-    }
-    else
-    {
-        for (unsigned int i=0; i<list.get_count(); i++)
-        {
-            pfc::string8 temp;
+		plm->set_active_playlist(playlist);
+	
+		pfc::string8 msg;
+		if (playlist != pfc::infinite_size)
+		{
+			// Build libsearch response msg 
+			msg << "500" << m_delimit << playlist << m_delimit
+				<< playlist_item_count << m_delimit << "\r\n";
+		}
+		if (CONSOLE_DEBUG) console::info(msg);
+		sendData(clientSocket, msg);
 
-            generateSearchString(list[i], temp, searchFor);
+	}
 
-            if (temp.find_first(searchFor)!=-1)
-            {
-                if (i == m_currTrackIndex && playlistIndex == m_currPlaylistIndex)
-                {
-                    calculateTrackStateHeader(foundItems, 2);
-                }
-                else
-                {
-                    foundItems << "501";  
-                }
+}
 
-                foundItems << m_delimit << playlistIndex << m_delimit
-                           << i+1 << m_delimit;
-                generateTrackString(list[i],foundItems, false);
+pfc::string8 trim(pfc::string8 &str)
+{
+	pfc::string8 out = str;
 
-                foundNumItems++;
-            }
-        }
-    }
+	size_t i = 0;
 
-    sendStr << "500" << m_delimit << playlistIndex << m_delimit
-            << foundNumItems << m_delimit << "\r\n";
-    sendStr << foundItems;
+	while (i < out.length() && out[i] == ' ')
+		++i;
 
-    sendData(clientSocket, sendStr);
+	if (i == out.length())
+		return pfc::string8("");
+
+	out.remove_chars(0, i);
+
+	i = out.length() - 1;
+
+	while (i > 0 && out[i] == ' ')
+		--i;
+
+	if (i < out.length())
+		out.truncate(i + 1);
+
+	return out;
+}
+
+bool controlserver::writeImageFile(char *filename, unsigned char *buf, int size)
+{
+	FILE *fp = fopen(filename, "wb");
+	if (fp != NULL)
+	{
+		int outsize = fwrite((void *)buf, sizeof(unsigned char), size, fp);
+		fclose(fp);
+		if (outsize == size)
+			return true;
+		else
+			return false;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+bool controlserver::readImageFile(char *img, unsigned char *buf)
+{
+	FILE *file = fopen(img, "rb");
+	if (file != NULL)
+	{
+		struct stat finfo;
+		stat(img, &finfo);
+		int fileSize = finfo.st_size;
+
+		//int fileLen;
+		//fseek(file, 0, SEEK_END);
+		//fileLen = ftell(file);
+		//fseek(file, 0, SEEK_SET);
+
+		buf = (unsigned char *)malloc(fileSize +1);
+		fread(buf, fileSize, 1, file);
+		unsigned char x;
+		for (int i = 0; i < fileSize; i++)
+		{
+			x = *buf++;
+		}
+		fclose(file);
+		// convert to base64
+	}
+	return true;
+}
+
+void controlserver::retrieveAlbumArt(albumart &art_out)
+{
+	static_api_ptr_t<playback_control_v2> pc;
+	metadb_handle_ptr pb_track_ptr;
+
+	pc->get_now_playing(pb_track_ptr);
+	if (pb_track_ptr == NULL)
+	{
+		art_out.pb_albumart_status = albumart::AS_NO_INFO;
+		return;
+	}
+
+	art_out.pb_albumart_status = albumart::AS_NOT_FOUND;
+
+	pfc::list_t<GUID> guids;
+	guids.add_item(album_art_ids::cover_front);
+	metadb_handle_list tracks;
+	tracks.add_item(pb_track_ptr);
+
+	// Foobar2000 do album art search using settings defined under :
+	// Files>Preferences>Advanced>Display>Album Art
+	// So either a picture file or embedded album art. 
+	// If an external file, it will look for jpg or png files named "folder", "cover", "front", 
+	// "artist name".
+
+	static_api_ptr_t<album_art_manager_v3> aam;
+	abort_callback_dummy abortCallback;
+	album_art_data::ptr art_ptr;
+
+	bool found = false;
+	album_art_extractor_instance_v2::ptr extractor = aam->open_v3(tracks, guids, NULL, abortCallback);
+
+	found = extractor->query(album_art_ids::cover_front, art_ptr, abortCallback);
+	if (!found)
+	{
+		found = extractor->query(album_art_ids::cover_back, art_ptr, abortCallback);
+		if (!found)
+		{
+			found = extractor->query(album_art_ids::disc, art_ptr, abortCallback);
+			if (!found)
+			{
+				found = extractor->query(album_art_ids::artist, art_ptr, abortCallback);
+			}
+		}
+	}
+
+	if (found)
+	{
+		art_out.pb_albumart_status = albumart::AS_FOUND;
+
+		if (art_ptr.is_valid())
+		{
+			art_out.size = art_ptr->get_size();
+			if (CONSOLE_DEBUG)
+			{
+				pfc::string8 msg;
+				msg << "found embedded art : size = " << art_out.size;
+				console::info(msg);
+			}
+
+			// Buffer contains contents of image file
+			unsigned char *buffer = new unsigned char[art_out.size];
+			memcpy((void *)buffer, (void *)art_ptr->get_ptr(), art_out.size);
+
+			// Convert image to base64 for transfer to client
+			base64_encode(art_out.base64string, (const void *)buffer, art_out.size);
+
+		}
+	}
 }
 
 // handle next command
@@ -863,8 +1012,11 @@ controlserver::handleNextCommand(SOCKET clientSocket, pfc::string8 recvCommand)
         return;
     }
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a next command";
-    console::info(msg);
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a next command";
+		console::info(msg);
+	}
 
     while (f != NULL)
     {
@@ -955,8 +1107,11 @@ controlserver::handlePrevCommand(SOCKET clientSocket, pfc::string8 recvCommand)
         return;
     }
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a prev command";
-    console::info(msg);
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a prev command";
+		console::info(msg);
+	}
 
     while (f != NULL)
     {
@@ -1047,8 +1202,11 @@ controlserver::handleRandomCommand(SOCKET clientSocket, pfc::string8 recvCommand
         return;
     }
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a random command";
-    console::info(msg);
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a random command";
+		console::info(msg);
+	}
 
     while (f != NULL)
     {
@@ -1118,9 +1276,11 @@ controlserver::handleStopCommand(SOCKET clientSocket)
     pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
     pfc::string8 msg;
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a stop command";
-    console::info(msg);
-
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a stop command";
+		console::info(msg);
+	}
     pbc->stop();
 }
 
@@ -1132,9 +1292,11 @@ controlserver::handlePauseCommand(SOCKET clientSocket)
     pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
     pfc::string8 msg;
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a pause command";
-    console::info(msg);
-
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a pause command";
+		console::info(msg);
+	}
     pbc->toggle_pause();
 }
 
@@ -1188,9 +1350,11 @@ controlserver::handleVolumeSetCommand(SOCKET clientSocket, pfc::string8 recvComm
         return;
     }
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a volume command";
-    console::info(msg);
-
+	if (CONSOLE_DEBUG)
+	{
+		//msg << "foo_controlserver: client from " << clientAddress << " issued a volume command";
+		//console::info(msg);
+	}
     while (f != NULL)
     {
         f = strtok(NULL, delim);
@@ -1321,8 +1485,11 @@ controlserver::handleListCommand(SOCKET clientSocket, pfc::string8 recvCommand)
         return;
     }
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a list command";
-    console::info(msg);
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a list command";
+		console::info(msg);
+	}
 
     while (f != NULL)
     {
@@ -1527,8 +1694,11 @@ controlserver::handlePlayCommand(SOCKET clientSocket, pfc::string8 recvCommand)
         return;
     }
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a play command";
-    console::info(msg);
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a play command";
+		console::info(msg);
+	}
 
     while (f != NULL)
     {
@@ -1630,8 +1800,11 @@ controlserver::handleHelpCommand(SOCKET clientSocket, bool verbose)
     pfc::string8 sendStr;
     pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a help command";
-    console::info(msg);
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a help command";
+		console::info(msg);
+	}
 
     if (verbose)
     {
@@ -1644,15 +1817,16 @@ controlserver::handleHelpCommand(SOCKET clientSocket, bool verbose)
         "999" << m_delimit << "pause                                                  - pause/unpause current track" << m_delimit << "\r\n" <<
         "999" << m_delimit << "stop                                                   - stop current track" << m_delimit << "\r\n" <<
         "999" << m_delimit << "list [playlist#] [<track#> <track#>]                   - list playlist tracks between range" << m_delimit << "\r\n" <<
-        "999" << m_delimit << "search [playlist#] <info>                              - search playlist for info" << m_delimit << "\r\n" <<
+        "999" << m_delimit << "libsearch 'playlist name' 'string'                     - media search for info, load results into playlist 'playlist name', use quotes on strings" << m_delimit << "\r\n" <<
         "999" << m_delimit << "listinfo [playlist#]|[<playlist#> <playlist#>]|['all'] - info about current playlist or all lists" << m_delimit << "\r\n" <<
         "999" << m_delimit << "serverinfo                                             - info about the server" << m_delimit << "\r\n" <<
         "999" << m_delimit << "trackinfo                                              - info about the current track" << m_delimit << "\r\n" <<
         "999" << m_delimit << "vol [#]|['up']|['down']|['mute']                       - get/set volume dB or up/down 0.50 dB or mute" << m_delimit << "\r\n" <<
         "999" << m_delimit << "order [type]                                           - get/set order type [default|random|repeatplaylist|repeattrack|shuffletrack|shufflealbum|shufflefolder]" << m_delimit << "\r\n" <<
         "999" << m_delimit << "queue [[playlist#] <track#>]                           - queue track from playlist or view queue" << m_delimit << "\r\n" <<
-        "999" << m_delimit << "queue del <index#>|<'all'>                             - delete queue index item from queue or clear all queue" << m_delimit << "\r\n";
-        
+        "999" << m_delimit << "queue del <index#>|<'all'>                             - delete queue index item from queue or clear all queue" << m_delimit << "\r\n" <<
+		"999" << m_delimit << "albumart                                               - get album art for now playing track" << m_delimit << "\r\n";
+
         if (!m_preventClose)
         {
             sendStr << "999" << m_delimit << "fooexit                                                - close foobar2000 (careful!)" << m_delimit << "\r\n";
@@ -1671,14 +1845,15 @@ controlserver::handleHelpCommand(SOCKET clientSocket, bool verbose)
         "999" << m_delimit << "pause" << m_delimit << "\r\n" <<
         "999" << m_delimit << "stop" << m_delimit << "\r\n" <<
         "999" << m_delimit << "list [playlist#] [<track#> <track#>]" << m_delimit << "\r\n" <<
-        "999" << m_delimit << "search [playlist#] <info>" << m_delimit << "\r\n" <<
+		"999" << m_delimit << "libsearch 'playlist name' 'string'" << m_delimit << "\r\n" <<
         "999" << m_delimit << "listinfo [playlist#]|[<playlist#> <playlist#>]|['all']" << m_delimit << "\r\n" <<
         "999" << m_delimit << "serverinfo" << m_delimit << "\r\n" <<
         "999" << m_delimit << "trackinfo" << m_delimit << "\r\n" <<
         "999" << m_delimit << "vol [#]|['up']|['down']|['mute']" << m_delimit << "\r\n" <<
         "999" << m_delimit << "order ['default'|'random'|'repeatplaylist'|'repeattrack'|'shuffletrack'|'shufflealbum'|'shufflefolder']" << m_delimit << "\r\n" <<
         "999" << m_delimit << "queue [[playlist#] <track#>]" << m_delimit << "\r\n" <<
-        "999" << m_delimit << "queue del <index#>|<'all'>" << m_delimit << "\r\n";
+        "999" << m_delimit << "queue del <index#>|<'all'>" << m_delimit << "\r\n" <<
+		"999" << m_delimit << "albumart" << m_delimit << "\r\n";
 
         if (!m_preventClose)
         {
@@ -1700,10 +1875,12 @@ controlserver::handleServerInfoCommand(SOCKET clientSocket)
     pfc::string8 sendStr;
     pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a serverinfo command";
-    console::info(msg);
-
-    sendStr << "999" << m_delimit << "Connected to foobar2000 Control Server v" << m_versionNumber << m_delimit << "\r\n" <<
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a serverinfo command";
+		console::info(msg);
+	}
+    sendStr << "999" << m_delimit << "Connected to foobar2000 Control Server " << m_versionNumber << m_delimit << "\r\n" <<
                "999" << m_delimit << "You are a client from " << calculateSocketAddress(clientSocket) << m_delimit << "\r\n" <<
                "999" << m_delimit << "There are currently " << m_vclientSockets.size() << "/" << m_maxClients << " clients connected" << m_delimit << "\r\n";
 
@@ -1786,9 +1963,11 @@ controlserver::handleOrderCommand(SOCKET clientSocket, pfc::string8 recvCommand)
         pfc::string8 msg;
         t_size orderIndex = plm->playback_order_get_active();
 
-        msg << "foo_controlserver: client from " << clientAddress << " issued an order request command";
-        console::info(msg);
-
+		if (CONSOLE_DEBUG)
+		{
+			msg << "foo_controlserver: client from " << clientAddress << " issued an order request command";
+			console::info(msg);
+		}
         strType = plm->playback_order_get_name(orderIndex);
     }
     else if (argCount == 1)
@@ -1797,57 +1976,72 @@ controlserver::handleOrderCommand(SOCKET clientSocket, pfc::string8 recvCommand)
 
         if (strncmp(arg1,"default",7) == 0)
         {
-            msg << "foo_controlserver: client from " << clientAddress <<" issued an order command 'default'";
-            console::info(msg);
-
+			if (CONSOLE_DEBUG)
+			{
+				msg << "foo_controlserver: client from " << clientAddress << " issued an order command 'default'";
+				console::info(msg);
+			}
             strType = plm->playback_order_get_name(0);
             plm->playback_order_set_active(0);
         }
         else if (strncmp(arg1,"repeatplaylist",14) == 0)
         {
-            msg << "foo_controlserver: client from " << clientAddress <<" issued an order command 'repeatplaylist'";
-            console::info(msg);
-
+			if (CONSOLE_DEBUG)
+			{
+				msg << "foo_controlserver: client from " << clientAddress << " issued an order command 'repeatplaylist'";
+				console::info(msg);
+			}
             strType = plm->playback_order_get_name(1);
             plm->playback_order_set_active(1);
         }
         else if (strncmp(arg1,"repeattrack",11) == 0)
         {
-            msg << "foo_controlserver: client from " << clientAddress <<" issued an order command 'repeattrack'";
-            console::info(msg);
-
+			if (CONSOLE_DEBUG)
+			{
+				msg << "foo_controlserver: client from " << clientAddress << " issued an order command 'repeattrack'";
+				console::info(msg);
+			}
             strType = plm->playback_order_get_name(2);
             plm->playback_order_set_active(2);
         }
 		else if (strncmp(arg1,"random",14) == 0)
         {
-            msg << "foo_controlserver: client from " << clientAddress <<" issued an order command 'repeatplaylist'";
-            console::info(msg);
-
+			if (CONSOLE_DEBUG)
+			{
+				msg << "foo_controlserver: client from " << clientAddress << " issued an order command 'repeatplaylist'";
+				console::info(msg);
+			}
             strType = plm->playback_order_get_name(3);
             plm->playback_order_set_active(3);
         }
         else if (strncmp(arg1,"shuffletrack",12) == 0)
         {
-            msg << "foo_controlserver: client from " << clientAddress <<" issued an order command 'shuffletrack'";
-            console::info(msg);
+			if (CONSOLE_DEBUG)
+			{
+				msg << "foo_controlserver: client from " << clientAddress << " issued an order command 'shuffletrack'";
+				console::info(msg);
+			}
 
             strType = plm->playback_order_get_name(4);
             plm->playback_order_set_active(4);
         }
         else if (strncmp(arg1,"shufflealbum",12) == 0)
         {
-            msg << "foo_controlserver: client from " << clientAddress <<" issued an order command 'shufflealbum'";
-            console::info(msg);
-
+			if (CONSOLE_DEBUG)
+			{
+				msg << "foo_controlserver: client from " << clientAddress << " issued an order command 'shufflealbum'";
+				console::info(msg);
+			}
             strType = plm->playback_order_get_name(5);
             plm->playback_order_set_active(5);
         }
         else if (strncmp(arg1,"shufflefolder",16) == 0)
         {
-            msg << "foo_controlserver: client from " << clientAddress <<" issued an order command 'shuffledirectory'";
-            console::info(msg);
-
+			if (CONSOLE_DEBUG)
+			{
+				msg << "foo_controlserver: client from " << clientAddress << " issued an order command 'shuffledirectory'";
+				console::info(msg);
+			}
             strType = plm->playback_order_get_name(6);
             plm->playback_order_set_active(6);
         }
@@ -1875,6 +2069,49 @@ controlserver::handleOrderCommand(SOCKET clientSocket, pfc::string8 recvCommand)
         }
     }
 }
+
+
+void
+controlserver::handleAlbumArtCommand(SOCKET clientSocket)
+{
+	pfc::string8 msg;
+	pfc::string8 sendStr;
+	pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
+
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued an albumart command";
+		console::info(msg);
+	}
+
+	// fetches album art for 'now playing' track from foobar2000.
+	// Embeds jpg, png, etc file into return datastream
+	// as a base64 text string. 
+	retrieveAlbumArt(m_albumart);
+
+	int base64Length = m_albumart.base64string.get_length();
+	if (m_albumart.pb_albumart_status == albumart::AS_NOT_FOUND ||
+		m_albumart.pb_albumart_status == albumart::AS_NO_INFO)
+	{
+		// No album art found
+		m_albumart.numBlocks = -1;
+		m_albumart.size = 0;
+	}
+	else
+	{
+		// If there is album art, send it in one message block as base.
+		// Image content is the raw bits of the jpg or png file
+		m_albumart.numBlocks = 1;
+	}
+
+	sendStr << "700" << m_delimit << m_albumart.numBlocks << m_delimit << base64Length << m_delimit << m_albumart.size << m_delimit << "\r\n";
+	sendStr << "701" << m_delimit << m_albumart.numBlocks << m_delimit << m_albumart.base64string << m_delimit << "\r\n";
+
+	// send the response
+	sendData(clientSocket, sendStr);
+}
+
+
 
 // handle a list info command
 void
@@ -1907,8 +2144,11 @@ controlserver::handleListInfoCommand(SOCKET clientSocket, pfc::string8 recvComma
         return;
     }
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a listinfo command";
-    console::info(msg);
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a listinfo command";
+		console::info(msg);
+	}
 
     while (f != NULL)
     {
@@ -2110,8 +2350,11 @@ controlserver::handleSeekTrackCommand(SOCKET clientSocket, pfc::string8 recvComm
         return;
     }
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a seek command";
-    console::info(msg);
+	if (CONSOLE_DEBUG)
+	{
+		msg << "foo_controlserver: client from " << clientAddress << " issued a seek command";
+		console::info(msg);
+	}
 
     while (f != NULL)
     {
@@ -2167,38 +2410,70 @@ controlserver::handleSeekTrackCommand(SOCKET clientSocket, pfc::string8 recvComm
     }
 }
 
+
 // handle a track info command
 void
 controlserver::handleTrackInfoCommand(SOCKET clientSocket)
 {
-    metadb_handle_ptr handleptr = NULL;
+	metadb_handle_ptr pb_item_ptr = NULL;
+    metadb_handle_ptr handlept = NULL;
     pfc::string8 sendStr;
     pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
     pfc::string8 msg;
     static_api_ptr_t<playlist_manager> plm;
+	static_api_ptr_t<play_control> pc;
 
-    msg << "foo_controlserver: client from " << clientAddress << " issued a trackinfo command";
-    console::info(msg);
+	if (CONSOLE_DEBUG)
+	{
+		//msg << "foo_controlserver: client from " << clientAddress << " issued a trackinfo command";
+		//console::info(msg);
+	}
+	t_size pb_item = pfc::infinite_size;
+	t_size pb_playlist = pfc::infinite_size;
 
-    // get handle from our index
-    plm->playlist_get_item_handle(handleptr, m_currPlaylistIndex, m_currTrackIndex);
+	if (pc->get_now_playing(pb_item_ptr))
+	{
+		plm->get_playing_item_location(&pb_playlist, &pb_item);  // returns playlist # and index to playing
+		
+		m_currPlaylistIndex = pb_playlist;
+		m_currTrackIndex = pb_item;
+		
+	}
 
-    if (handleptr == NULL)
-    {
-        sendStr << "115";
-        sendStr << m_delimit << m_currPlaylistIndex;
-        sendStr << m_delimit << m_currTrackIndex+1 << m_delimit;
-        sendStr << "Track no longer exists in playlist" << m_delimit << "\r\n";
-    }
-    else
-    {
-        calculateTrackStateHeader(sendStr, 0);
-        sendStr << m_delimit << m_currPlaylistIndex;
-        sendStr << m_delimit << m_currTrackIndex+1 << m_delimit;
+	if (pb_item_ptr == NULL) // no track playing
+	{
+		// try to extract from playlist
+		plm->playlist_get_item_handle(handlept, m_currPlaylistIndex, m_currTrackIndex);
 
-        // generate the track info and append to sendStr
-        generateTrackString(handleptr, sendStr, true);
-    }
+		if (handlept == NULL)  // not in playlist either
+		{
+			sendStr << "115" << m_delimit << m_currPlaylistIndex
+				<< m_delimit << m_currTrackIndex + 1
+				<< m_delimit << "Track no longer exists in playlist" << m_delimit << "\r\n";
+		}
+		else
+		{
+			calculateTrackStateHeader(sendStr, 0);
+			sendStr << m_delimit << m_currPlaylistIndex;
+			sendStr << m_delimit << m_currTrackIndex + 1 << m_delimit;
+
+			// fill in string with track information from playlist
+			generateTrackString(handlept, sendStr, true);
+
+		}
+	}
+	else
+	{
+		calculateTrackStateHeader(sendStr, 0);
+		sendStr << m_delimit << m_currPlaylistIndex;
+		if (m_currTrackIndex==pfc::infinite_size)
+			sendStr << m_delimit << m_currTrackIndex << m_delimit;
+		else
+			sendStr << m_delimit << m_currTrackIndex + 1 << m_delimit;
+
+		// fill in string with playing track information
+		generateTrackString(pb_item_ptr, sendStr, true);
+	}
 
     // now finally send the response
     sendData(clientSocket, sendStr);
@@ -2224,11 +2499,9 @@ WINAPI controlserver::ClientThread(void* cs)
     // create event
     if((event = WSACreateEvent()) == NULL)
     {
-        pfc::string8 msg;
-
-        msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
-        console::warning(msg);
-
+		pfc::string8 msg;
+		msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
+		console::warning(msg);
         shutdownClient(clientSocket);
 
         return 0;
@@ -2240,12 +2513,11 @@ WINAPI controlserver::ClientThread(void* cs)
     // select the events we want to monitor
     if ((WSAEventSelect(clientSocket, event, FD_READ|FD_CLOSE)) == SOCKET_ERROR)
     {
-        pfc::string8 msg;
-
-        msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
-        msg << " WSAEventSelect()";
-        console::warning(msg);
-
+		pfc::string8 msg;
+		msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
+		msg << " WSAEventSelect()";
+		console::warning(msg);
+		
         shutdownClient(clientSocket);
 
         return 0;
@@ -2265,12 +2537,11 @@ WINAPI controlserver::ClientThread(void* cs)
                     FALSE))                                     // don't use a completion routine
                 == WSA_WAIT_FAILED)
         {
-            pfc::string8 msg;
-
-            msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
-            msg << " WSAWaitForMultipleEvents()";
-            console::warning(msg);
-
+			pfc::string8 msg;
+			msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
+			msg << " WSAWaitForMultipleEvents()";
+			console::warning(msg);
+			
             break;
         } // end of if
 
@@ -2286,12 +2557,10 @@ WINAPI controlserver::ClientThread(void* cs)
             // see which type of network event
             if ((WSAEnumNetworkEvents(clientSocket, event, &networkEvents))== SOCKET_ERROR)
             {
-                pfc::string8 msg;
-
-                msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
-                msg << " WSAEnumNetworkEvents()";
-                console::warning(msg);
-
+				pfc::string8 msg;
+				msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
+				msg << " WSAEnumNetworkEvents()";
+				console::warning(msg);
                 break;
             }
 
@@ -2301,11 +2570,10 @@ WINAPI controlserver::ClientThread(void* cs)
                 // see if there was an error on the close event
                 if (networkEvents.iErrorCode[FD_CLOSE_BIT] != 0)
                 {
-                    pfc::string8 msg;
-
-                    msg << "foo_controlserver: error " << networkEvents.iErrorCode[FD_CLOSE_BIT] << " on client from " << clientAddress;
-                    msg << " FD_CLOSE";
-                    console::warning(msg);
+					pfc::string8 msg;
+					msg << "foo_controlserver: error " << networkEvents.iErrorCode[FD_CLOSE_BIT] << " on client from " << clientAddress;
+					msg << " FD_CLOSE";
+					console::warning(msg);
                 }
 
                 // break out so exit can happen
@@ -2318,13 +2586,11 @@ WINAPI controlserver::ClientThread(void* cs)
                 // check for error
                 if (networkEvents.iErrorCode[FD_READ_BIT] != 0)
                 {
-                    pfc::string8 msg;
-
-                    msg << "foo_controlserver: error " << networkEvents.iErrorCode[FD_READ_BIT] << " on client from " << clientAddress;
-                    msg << " FD_READ";
-
-                    console::warning(msg);
-
+					pfc::string8 msg;
+					msg << "foo_controlserver: error " << networkEvents.iErrorCode[FD_READ_BIT] << " on client from " << clientAddress;
+					msg << " FD_READ";
+					console::warning(msg);
+					
                     // break out so exit can happen
                     break;
                 }
@@ -2339,12 +2605,11 @@ WINAPI controlserver::ClientThread(void* cs)
 
                     if (lastError != WSAEWOULDBLOCK)
                     {
-                        pfc::string8 msg;
-
-                        msg << "foo_controlserver: error " << WSAGetLastError();
-                        msg << " on recv() on client from " << clientAddress;
-                        console::warning(msg);
-
+						pfc::string8 msg;
+						msg << "foo_controlserver: error " << WSAGetLastError();
+						msg << " on recv() on client from " << clientAddress;
+						console::warning(msg);
+						
                         break;
                     } else
                     {
@@ -2427,15 +2692,22 @@ WINAPI controlserver::ClientThread(void* cs)
                     }
                 } else
 
+			    // get album art
+			    if (strncmp(recvCommand, "albumart", 8) == 0)
+			    {
+						cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::albumart, clientSocket, recvCommand));
+				}
+				else
+
                 // did they ask for list info
                 if (strncmp(recvCommand, "listinfo", 8) == 0)
                 {
                     cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::listinfo, clientSocket, recvCommand));
                 } else
 
-                if (strncmp(recvCommand, "search", 6) == 0)
+                if (strncmp(recvCommand, "libsearch", 9) == 0)
                 {
-                    cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::search, clientSocket, recvCommand));
+                    cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::libsearch, clientSocket, recvCommand));
                 } else
 
                 if (strncmp(recvCommand, "order", 5) == 0)
@@ -2475,7 +2747,8 @@ WINAPI controlserver::ClientThread(void* cs)
                 
                 if (strncmp(recvCommand, "fooexit", 7) == 0 && !m_preventClose)
                 {
-                    standard_commands::run_main(standard_commands::guid_main_exit);                    
+                    //standard_commands::run_main(standard_commands::guid_main_exit);  
+					standard_commands::run_main(standard_commands::guid_main_restart);	
                 } else
 
                 if (strncmp(recvCommand, "stop", 4) == 0)
@@ -2539,11 +2812,10 @@ controlserver::calculateSocketAddress(SOCKET clientSocket)
     // get the sockaddr structure
     if (getpeername(clientSocket, reinterpret_cast<SOCKADDR*>(&clientAddr), &clientAddrSize) == SOCKET_ERROR)
     {
-        pfc::string8 msg;
-
-        msg << "foo_controlserver: error " << WSAGetLastError() << " on getpeername()";
-        console::warning(msg);
-
+		pfc::string8 msg;
+		msg << "foo_controlserver: error " << WSAGetLastError() << " on getpeername()";
+		console::warning(msg);
+		
         clientAddress.reset();
 
         return clientAddress;
@@ -2559,12 +2831,12 @@ controlserver::calculateSocketAddress(SOCKET clientSocket)
 void
 controlserver::shutdownClient(SOCKET clientSocket)
 {
-    pfc::string8 msg;
     char dataBuf[m_bufferSize];
     pfc::string8 clientAddress(calculateSocketAddress(clientSocket));
 
-    msg << "foo_controlserver: client from " << clientAddress << " disconnected";
-    console::info(msg);
+	pfc::string8 msg;
+	msg << "foo_controlserver: client from " << clientAddress << " disconnected";
+	console::info(msg);
 
     std::vector<SOCKET>::iterator it;
     for (it=m_vclientSockets.begin(); it!= m_vclientSockets.end(); it++)
@@ -2581,30 +2853,27 @@ controlserver::shutdownClient(SOCKET clientSocket)
         //send and receive FIN packets
         if (shutdown(clientSocket, 2) == SOCKET_ERROR)
         {
-            pfc::string8 msg;
-
-            msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
-            msg << " shutdown";
-            console::warning(msg);
+			pfc::string8 msg;
+			msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
+			msg << " shutdown";
+			console::warning(msg);	
         }
 
         if (recv(clientSocket, dataBuf, sizeof(dataBuf), 0) == SOCKET_ERROR)
         {
-//            pfc::string8 msg;
-
-            // we will get a WSAESHUTDOWN
-//            msg << "foo_controlserver: error " << WSAGetLastError() << " on recv() on client ";
-//            msg << clientAddress;
-//            console::warning(msg);
+				//            pfc::string8 msg;
+				//   we will get a WSAESHUTDOWN
+				//            msg << "foo_controlserver: error " << WSAGetLastError() << " on recv() on client ";
+				//            msg << clientAddress;
+				//            console::warning(msg);
         }
 
         if (closesocket(clientSocket) == SOCKET_ERROR)
         {
-            pfc::string8 msg;
-
-            msg << "foo_controlserver: error " << WSAGetLastError() << " on closesocket() on client ";
-            msg << clientAddress;
-            console::warning(msg);
+			pfc::string8 msg;
+			msg << "foo_controlserver: error " << WSAGetLastError() << " on closesocket() on client ";
+			msg << clientAddress;
+			console::warning(msg);
         }
     }
 }
@@ -2739,6 +3008,68 @@ controlserver::validateConnectionMask(SOCKADDR_IN sock)
     return false;
 }
 
+pfc::string8 controlserver::getLocalHostIP()
+{
+	char host[256];
+	pfc::string8 msg = "";
+	pfc::string8 error_msg = "";
+
+	WSADATA            wsd;
+	// start up winsock
+	if (WSAStartup(MAKEWORD(2, 2), &wsd) == 0)
+	{
+		if (wsd.wVersion == MAKEWORD(2, 2))
+		{
+
+			if (gethostname(host, sizeof(host)) == SOCKET_ERROR) 
+			{
+				error_msg << "no host info - error " << WSAGetLastError() << " when getting host";
+			}
+			else
+			{
+				//msg << host;
+
+				struct hostent *phosts = gethostbyname(host);
+				if (phosts == 0) 
+				{
+					error_msg << " Bad host lookup";
+				}
+				else
+				{
+
+					for (int i = 0; phosts->h_addr_list[i] != 0; ++i)
+					{
+						struct in_addr addr;
+						memcpy(&addr, phosts->h_addr_list[i], sizeof(struct in_addr));
+						msg << inet_ntoa(addr) << "  ";
+					}
+				}
+
+			}
+
+			WSACleanup();
+		}
+		else
+		{
+			error_msg = "no host info - error opening network";
+		}
+	}
+	else
+	{
+		error_msg = "no host info - error opening network";
+	}
+
+	if (error_msg.get_length() > 0)
+	{
+		return error_msg;
+	}
+	else
+	{
+		return msg;
+	}
+}
+
+
 // start up the server and listen for connections/spawn client handling threads
 void
 controlserver::start(int port, HANDLE endEvent)
@@ -2759,11 +3090,11 @@ controlserver::start(int port, HANDLE endEvent)
     // start up winsock
     if (WSAStartup(MAKEWORD(2,2), &wsd) != 0)
     {
-        pfc::string8 str;
+		pfc::string8 str;
 
-        str << "foo_controlserver: error" << WSAGetLastError() << " on server WSAStartup";
-        console::warning(str);
-
+		str << "foo_controlserver: error" << WSAGetLastError() << " on server WSAStartup";
+		console::warning(str);
+		
         return;
     }
 
@@ -2872,10 +3203,14 @@ controlserver::start(int port, HANDLE endEvent)
         return;
     }
 
-    pfc::string8 msg;
-
+	pfc::string8 msg;
+	msg << "This PC : " << controlserver::getLocalHostIP();
+	console::info(msg);
+	msg = "";
     msg << "foo_controlserver: control server up and running on port " << port;
     console::info(msg);
+
+	
 
     // force update of track infos
     cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::inittrackers));
@@ -2992,7 +3327,7 @@ controlserver::start(int port, HANDLE endEvent)
                     continue;
                 }
 
-                sendStr << "999" << m_delimit << "Connected to foobar2000 Control Server v" <<
+                sendStr << "999" << m_delimit << "Connected to foobar2000 Control Server " <<
                             m_versionNumber << m_delimit << "\r\n" <<
                        "999" << m_delimit << "Accepted client from " << inet_ntoa(client.sin_addr) <<
                             m_delimit << "\r\n" <<
