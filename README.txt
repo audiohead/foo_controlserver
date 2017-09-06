@@ -1,27 +1,19 @@
-foo_controlserver Version 1.0.2
+foo_controlserver Version 1.1.3
 -------------------------------
-
-
 Foo_controlserver is a Foobar2000 plug-in enabling remote control of Foobar2000
 via an Ethernet socket connection.
 
- 
-
 You would use it in a setup composed of:
-
-
 
 Foobar2000 running on a server PC on your local network, and with the
 foo_controlserver plug-in installed and configured.
 
-
 You would then use a remote client app to connect to and control Foobar2000
-over your local network. 
- 
+over your local network.
+
 You can use any remote client app that sends and receives commands defined
 for foo_controlserver. One such remote client app is 'Foobar2000 Copilot',
 a Windows Phone app.  See : http://www.foobar2000copilot.com
-
 
 INSTALLING the foo_controlserver.zip component in Foobar2000
 ------------------------------------------------------------
@@ -52,4 +44,15 @@ in the archive.
 Version History:
 
 >> foo_controlserver Version 1.0.2 - original baseline version by Jason Poloski 
+
+>> foo_controlserver Version 1.1.3 Nov 2016 - updates by Walter Hartman
+   - Rebuilt using VS2015 Community
+   - Rebuilt with new Foobar2000 SDK version 2015-08-03
+   - Updated preferences dialog to use the new foobar2000 SDK APIs
+     (you will no longer see the 'this is a legacy preferences page' warning)
+   - Added IP address display of local PC to preferences dialog
+   - Added get album art command, returns image (jpg or png), encoded as a base64 string
+   - Added media library search command
+   - Fixed some bugs related to the 'now playing' track
+
 

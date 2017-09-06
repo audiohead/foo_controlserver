@@ -20,3 +20,24 @@ foo_controlserver is a server plugin to control foobar2000
 over TCP/IP developed by Jason Poloski <j.poloski@ieee.org>
 
 Other major contributors and their contributions:
+
+Walter Hartman  Version 1.1.3  November 2016
+ - rebuilt with Visual Studio VS2015 Community edition
+ - rebuilt with new foobar2000 SDK-2015-08-03
+ - album art fetch
+ - media library search
+ - updated preference dialog to use newer foobar2000 SDK APIs 
+      you will no longer see 'this is a legacy preferences page' warning
+ - added display of IP address of local PC in preferences dialog
+ - fixed some 'now playing' track bugs
+
+Full source code for this version is available at : 
+
+https://github.com/audiohead/foo_controlserver/releases 
+ 
+The Foobar2000 SDK-2015-08-03 is available at :
+ 
+http://www.foobar2000.org/SDK
+ 
+ 
+ 
