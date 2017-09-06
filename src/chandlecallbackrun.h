@@ -16,20 +16,23 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ *
+ * Nov 2016 - added album art, library search functions - Walter Hartman
+ *
  */
 
 #ifndef INC_CHANDLERCALLBACKRUN_H
 #define INC_CHANDLERCALLBACKRUN_H
 
 #include "controlserver.h"
-#include "../foobar2000_sdk/foobar2000/SDK/foobar2000.h"
+#include "../../SDK/foobar2000.h"
 
 class CHandleCallbackRun : public main_thread_callback
 {
 public:
     enum CallbackType { trackupdatefromptr, trackupdateonconnect, play, listinfo, \
-                        search, order, trackinfo, inittrackers, volumeset, list, \
-                        queue, next, prev, rand, stop, pause, seek, volumechange };
+                        libsearch, order, trackinfo, inittrackers, volumeset, list, \
+                        queue, next, prev, rand, stop, pause, seek, volumechange, albumart };
 
     CHandleCallbackRun(CallbackType);
     CHandleCallbackRun(CallbackType, SOCKET);
@@ -44,6 +47,7 @@ private:
     pfc::string8 m_str;
     metadb_handle_ptr m_trackPtr;
     float m_vol;
+	//albumart art;
 };
 
 #endif  // INC_CHANDLERCALLBACKRUN_H

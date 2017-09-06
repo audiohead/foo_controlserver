@@ -16,6 +16,9 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ *
+ * Nov 2016 - added album art, library search functions - Walter Hartman
+ *
  */
 
 #ifndef INC_CONTROLSERVER_H
@@ -23,8 +26,11 @@
 
 #include <winsock2.h>
 #include <vector>
-#include "../foobar2000_sdk/foobar2000/SDK/foobar2000.h"
-#include "../foobar2000_sdk/pfc/pfc.h"
+#include "../../SDK/foobar2000.h"
+
+#include "../../../pfc/pfc.h"
+
+#include "albumart.h"
 
 class controlserver
 {
@@ -42,13 +48,16 @@ public:
     static t_size m_currPlaylistIndex;
     static metadb_handle_ptr m_currTrackPtr;
     static metadb_handle_ptr m_prevTrackPtr;
+	static albumart m_albumart;
 
     controlserver();
     ~controlserver();
 
     static void handleVolumeSetCommand(SOCKET, pfc::string8);
     static void handleListCommand(SOCKET, pfc::string8);
-    static void handleNextCommand(SOCKET, pfc::string8);
+	static void retrieveAlbumArt(albumart& out);
+	//static BitmapImage ImageFromBuffer(Byte[] bytes);
+	static void handleNextCommand(SOCKET, pfc::string8);
     static void handlePrevCommand(SOCKET, pfc::string8);
     static void handleStopCommand(SOCKET);
     static void handlePauseCommand(SOCKET);
@@ -56,17 +65,20 @@ public:
     static void handleServerInfoCommand(SOCKET);
     static void handlePlayCommand(SOCKET, pfc::string8);
     static void handleTrackInfoCommand(SOCKET);
+	static void handleAlbumArtCommand(SOCKET);
     static void handleListInfoCommand(SOCKET, pfc::string8);
     static void handleOrderCommand(SOCKET, pfc::string8);
     static void handleRandomCommand(SOCKET, pfc::string8);
-    static void handleSearchCommand(SOCKET, pfc::string8);
+    static void handleLibSearchCommand(SOCKET, pfc::string8);
+	static bool controlserver::writeImageFile(char *filename, unsigned char *buf, int size);
+	static bool readImageFile(char *img, unsigned char *buf);
     static void handleQueueTrackCommand(SOCKET, pfc::string8);
     static void handleSeekTrackCommand(SOCKET, pfc::string8);
 
     static void start(int, HANDLE);
+	static pfc::string8 controlserver::getLocalHostIP();
     static void handleDelimitStringChange(pfc::string8 const&); // thread safe?
     static void handleFieldsChange(pfc::string8 const&);        // thread safe?
-    static void handleDelimitEmptyChange(t_size);
     static void handleUtf8OutputChange(t_size);
     static void handlePreventCloseChange(t_size);
     static void handleMaxClientsChange(t_size);
@@ -79,6 +91,7 @@ public:
     static bool convertStrToF(char const*, double&);
     static void generateTrackString(metadb_handle_ptr, pfc::string8&, bool);
     static bool convertFromWide(pfc::string8 const&, pfc::string8&);
+	static pfc::string8 controlserver::generateNowPlayingTrackString();
 
 private:
     static t_size m_utf8Output;
@@ -93,6 +106,7 @@ private:
     static bool sendData(SOCKET, pfc::string8 const&);
     static bool validateConnectionMask(SOCKADDR_IN);
     static bool validateFuzzyMatch(pfc::string8, pfc::string8);
+	
 };
 
 #endif  // INC_CONTROLSERVER_H
