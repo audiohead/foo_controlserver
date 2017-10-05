@@ -1,4 +1,4 @@
-foo_controlserver Version 1.1.3
+foo_controlserver Version 1.1.4
 -------------------------------
 Foo_controlserver is a Foobar2000 plug-in enabling remote control of Foobar2000
 via an Ethernet socket connection.
@@ -42,9 +42,9 @@ in the archive.
 ------------------------------------------------------------
 
 VERSION HISTORY:
-
->> foo_controlserver Version 1.0.2 - original baseline version by Jason Poloski 
-
+>> foo_controlserver Version 1.1.4 Sept 2017 - updates by Walter Hartman
+   - Added track title and album title to 'now playing' album art msg response
+   
 >> foo_controlserver Version 1.1.3 Nov 2016 - updates by Walter Hartman
    - Rebuilt using VS2015 Community
    - Rebuilt with new Foobar2000 SDK version 2015-08-03
@@ -54,5 +54,7 @@ VERSION HISTORY:
    - Added get album art command, returns image (jpg or png), encoded as a base64 string
    - Added media library search command
    - Fixed some bugs related to the 'now playing' track
+
+>> foo_controlserver Version 1.0.2 - original baseline version by Jason Poloski 
 
 

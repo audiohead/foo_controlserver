@@ -9,7 +9,7 @@ A summary of the contents is as follows:
 
 \foo_controlserver.zip       foo_controlserver component install file for foobar2000
 \src                         C++ source files and Visual Studio project/solution files
-\COPYING.GPL.txt             the GPL license
+\LICENSE                     the GPL v2 license
 \AUTHORS.txt                 information, contributions with regards to the authors
 \README_FILES.txt            this document
 \README.txt                  overview, links to install, version history
