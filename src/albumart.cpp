@@ -19,5 +19,6 @@ void albumart::reset(void)
 	numBlocks = 0;
 	size = 0;
 
+	trackTitle.reset();
 	base64string.reset();
 }

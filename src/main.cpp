@@ -15,10 +15,13 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Ste 500, Boston, MA 02110-1301, USA.
  */
 
 /*
+ * Version 1.1.4 Sept 2017 - Walter Hartman
+ *   - Added track title and album title to 'now playing' album art image response
+ *
  * Version 1.1.3 Nov 2016 - Walter Hartman
  *   - Rebuilt using VS2015 Community and the new foobar2000 SDK version 2015-08-03
  *   - Updated the preferences dialog to use the new foobar2000 API's
@@ -28,7 +31,7 @@
  *   - Fixed some bugs related to the 'now playing' track
  *
  *   This version of foo_controlserver component was built in the free version of
- *   Microsoft Visual Studio Community 2015 in C++, and also requires installation of
+ *   Microsoft Visual Studio Community 2015 in C++, and requires installation of
  *   the Windows Template Library WTL and the Microsoft Foundation Class Library MFC
  *   in your VS2015 setup. You will also need the Foobar2000 SDK to do this build.
  * 
@@ -598,7 +601,11 @@ DECLARE_COMPONENT_VERSION("Control Server", controlserver::m_versionNumber,
 "\n"
 "You should have received a copy of the GNU General Public License\n"
 "along with this program; if not, write to the Free Software\n"
-"Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.\n"
+"Foundation, Inc., 51 Franklin Street, Ste 500, Boston, MA 02110-1301, USA.\n"
+"\n"
+"September 2017 Updated Version 1.1.4 :  Walter Hartman\n"
+"\n"
+"- Added track title and album title to 'now playing' album art msg response\n"
 "\n"
 "November 2016 Updated Version 1.1.3 :  Walter Hartman\n"
 "\n"
@@ -606,12 +613,12 @@ DECLARE_COMPONENT_VERSION("Control Server", controlserver::m_versionNumber,
 "as free software and under the same terms, listed above, as the\n"
 "original.\n"
 "\n"
-"Updates include album art, media library search, use of the\n"
+"Updates include album art retrieval, media library search, use of the\n"
 "newer SDK-2015-08-03 API's for the preferences screen, display\n"
 "of the local PC IP.\n"
 "\n"
-"This foo_controlserver.zip component is available at : \n"
+"This foo_controlserver.zip component (and full source code) is available at:\n"
 "\n"
-"https://github.com/audiohead/foo_controlserver \n");
+"https://github.com/audiohead/foo_controlserver/releases \n");
 						  
 

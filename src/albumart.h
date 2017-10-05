@@ -18,6 +18,8 @@ public:
 
 	int numBlocks;
 	int size;
+	pfc::string8 trackTitle;   // track title for this album art
+	pfc::string8 albumTitle;   // album title
 	pfc::string8 base64string; // return base 64 string of jpg or png album art
 
 public:

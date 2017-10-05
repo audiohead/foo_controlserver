@@ -15,7 +15,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Ste 500, Boston, MA 02110-1301, USA.
  *
  * Nov 2016 - added album art, library search functions - Walter Hartman
  *
@@ -26,7 +26,7 @@
 
 #include "debug.h"
 
-pfc::string8 const controlserver::m_versionNumber = "1.1.3";
+pfc::string8 const controlserver::m_versionNumber = "1.1.4";
 std::vector<SOCKET> controlserver::m_vclientSockets;
 HANDLE controlserver::m_WSAendEvent = NULL;
 pfc::string8 controlserver::m_metafields;
@@ -728,6 +728,16 @@ controlserver::handleQueueTrackCommand(SOCKET clientSocket, pfc::string8 recvCom
 
 void controlserver::handleLibSearchCommand(SOCKET clientSocket, pfc::string8 recvCommand)
 {
+	// Command form : libsearch 'playlist name' 'string'
+	// strings are quoted since can have spaces
+
+	// Build libsearch response msg 
+	// "500|playlist number with results|matched count"
+
+	// After receiving this response msg, you will need
+	// to refresh your list of playlists and redownload
+	// the 'library query' playlist
+
 	pfc::string8 msg;
 	pfc::string8 playlistName;
 	pfc::string8 searchFor;
@@ -744,9 +754,6 @@ void controlserver::handleLibSearchCommand(SOCKET clientSocket, pfc::string8 rec
 
 	// strip off end of lines
 	recvCommand.truncate_eol();
-
-	// Command form : libsearch 'playlist name' 'string'
-	// strings are quoted since can have spaces
 
 	int len = recvCommand.get_length();
 	if (len < 11)
@@ -831,7 +838,7 @@ void controlserver::handleLibSearchCommand(SOCKET clientSocket, pfc::string8 rec
 		pfc::string8 msg;
 		if (playlist != pfc::infinite_size)
 		{
-			// Build libsearch response msg 
+			// "500|playlist number with results|matched count"
 			msg << "500" << m_delimit << playlist << m_delimit
 				<< playlist_item_count << m_delimit << "\r\n";
 		}
@@ -917,14 +924,39 @@ void controlserver::retrieveAlbumArt(albumart &art_out)
 	static_api_ptr_t<playback_control_v2> pc;
 	metadb_handle_ptr pb_track_ptr;
 
+	art_out.reset();
+
 	pc->get_now_playing(pb_track_ptr);
 	if (pb_track_ptr == NULL)
 	{
 		art_out.pb_albumart_status = albumart::AS_NO_INFO;
+		if (CONSOLE_DEBUG)
+		{
+			pfc::string8 msg;
+			msg << "pb ptr null so NO_INFO album art";
+			console::info(msg);
+		}
+
 		return;
 	}
 
 	art_out.pb_albumart_status = albumart::AS_NOT_FOUND;
+
+	// extract track title for now playing track
+	pfc::string8 title;
+	service_ptr_t<titleformat_object> script;
+	static_api_ptr_t<titleformat_compiler>()->compile_safe(script, "%title%");
+
+	pb_track_ptr->format_title(NULL, title, script, NULL);
+	art_out.trackTitle = title;
+
+	// extract album title for now playing track
+	pfc::string8 album;
+	service_ptr_t<titleformat_object> script2;
+	static_api_ptr_t<titleformat_compiler>()->compile_safe(script2, "%album%");
+
+	pb_track_ptr->format_title(NULL, album, script2, NULL);
+	art_out.albumTitle = album;
 
 	pfc::list_t<GUID> guids;
 	guids.add_item(album_art_ids::cover_front);
@@ -969,6 +1001,8 @@ void controlserver::retrieveAlbumArt(albumart &art_out)
 			{
 				pfc::string8 msg;
 				msg << "found embedded art : size = " << art_out.size;
+				msg << " title=" << art_out.trackTitle;
+				msg << " album=" << art_out.albumTitle;
 				console::info(msg);
 			}
 
@@ -980,6 +1014,18 @@ void controlserver::retrieveAlbumArt(albumart &art_out)
 			base64_encode(art_out.base64string, (const void *)buffer, art_out.size);
 
 		}
+	}
+	else
+	{
+		if (CONSOLE_DEBUG)
+		{
+			pfc::string8 msg;
+			msg << "no album art found ";
+			msg << " title=" << art_out.trackTitle;
+			msg << " album=" << art_out.albumTitle;
+			console::info(msg);
+		}
+
 	}
 }
 
@@ -2078,15 +2124,17 @@ controlserver::handleAlbumArtCommand(SOCKET clientSocket)
 	pfc::string8 sendStr;
 	pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
 
+	// fetches album art for 'now playing' track from foobar2000.
+	// Embeds jpg, png, etc file into return datastream
+	// as a base64 text string.
+	// Response is sent back as a 2 part message, see below for details
+
 	if (CONSOLE_DEBUG)
 	{
 		msg << "foo_controlserver: client from " << clientAddress << " issued an albumart command";
 		console::info(msg);
 	}
 
-	// fetches album art for 'now playing' track from foobar2000.
-	// Embeds jpg, png, etc file into return datastream
-	// as a base64 text string. 
 	retrieveAlbumArt(m_albumart);
 
 	int base64Length = m_albumart.base64string.get_length();
@@ -2104,8 +2152,13 @@ controlserver::handleAlbumArtCommand(SOCKET clientSocket)
 		m_albumart.numBlocks = 1;
 	}
 
-	sendStr << "700" << m_delimit << m_albumart.numBlocks << m_delimit << base64Length << m_delimit << m_albumart.size << m_delimit << "\r\n";
-	sendStr << "701" << m_delimit << m_albumart.numBlocks << m_delimit << m_albumart.base64string << m_delimit << "\r\n";
+	// Send 2 part album art response
+	// 700|numBlocks|base64Length|size of album art image file|trackTitle|albumTitle|
+	// 701|numBlocks|base64string of image|
+	// numBlocks = -1 if no image file, else always 1 (one block)
+	// image file is transferred as a base64 string
+	sendStr << "700" << m_delimit << m_albumart.numBlocks << m_delimit << base64Length << m_delimit << m_albumart.size << m_delimit << m_albumart.trackTitle << m_delimit << m_albumart.albumTitle << m_delimit << "\r\n";
+    sendStr << "701" << m_delimit << m_albumart.numBlocks << m_delimit << m_albumart.base64string << m_delimit << "\r\n";
 
 	// send the response
 	sendData(clientSocket, sendStr);
