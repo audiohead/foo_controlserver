@@ -3,7 +3,7 @@ foo_controlserver
 =======================
 
 This is the binary/source release for foo_controlserver.
-All files are released under the GPL (see COPYING.GPL.txt).
+All files are released under the GPL (see LICENSE).
 
 A summary of the contents is as follows:
 
