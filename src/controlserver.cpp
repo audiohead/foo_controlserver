@@ -17,7 +17,12 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Ste 500, Boston, MA 02110-1301, USA.
  *
- * Nov 2016 - added album art, library search functions - Walter Hartman
+ * Dec 2017 - Updates to socket msg sending - Walter Hartman
+ *            Included plenty of comments in the code below to document
+ *            the behavior of Windows socket msg sending and what
+ *            some of the performance considerations are
+ *
+ * Sept 2017 - added album art, library search functions - Walter Hartman
  *
  */
 
@@ -26,13 +31,14 @@
 
 #include "debug.h"
 
-pfc::string8 const controlserver::m_versionNumber = "1.1.4";
+pfc::string8 const controlserver::m_versionNumber = "1.1.5";
 std::vector<SOCKET> controlserver::m_vclientSockets;
+std::vector<bool> controlserver::m_canSends;
 HANDLE controlserver::m_WSAendEvent = NULL;
 pfc::string8 controlserver::m_metafields;
 pfc::string8 controlserver::m_delimit;
 pfc::string8 controlserver::m_connectionMask;
-unsigned int const controlserver::m_bufferSize = 256;
+unsigned int const controlserver::m_bufferSize = 1024;
 t_size controlserver::m_maxClients = 4;
 bool controlserver::m_muted = false;
 t_size controlserver::m_currTrackIndex = 0;
@@ -42,18 +48,20 @@ metadb_handle_ptr controlserver::m_prevTrackPtr;
 metadb_handle_ptr controlserver::m_currTrackPtr;
 t_size controlserver::m_utf8Output = false;
 t_size controlserver::m_preventClose = true;
-albumart controlserver::m_albumart;
+int const controlserver::m_BytesInMB = 1048576;
+int const controlserver::m_socketBufferSize = 8 * m_BytesInMB; // 8 MB -- see code comments
+double const controlserver::m_maxImageSizeMB = 1.5; // max album art image size in MB
+bool controlserver::m_Exiting;
+CRITICAL_SECTION controlserver::cs;
 
 // constructor
 controlserver::controlserver()
 {
-
 };
 
 // destructor
 controlserver::~controlserver()
 {
-
 };
 
 
@@ -78,45 +86,205 @@ controlserver::convertFromWide(pfc::string8 const& incoming, pfc::string8& outpu
     return true;
 }
 
-// used to send data to clients
+// General background comments on socket sends:
+
+// Windows tries to be smart about adjusting the socket send buffer based on the sizes of your sends.
+// You can use the 'getsockopt SD_SNDBUF' call to see what Windows has the send buffer set to at
+// various points in the code. You will see by default it sets that buffer size to 64K, but adjusts
+// this size upwards if you have much larger data messages.
+
+// The issue is in Foobar2000 Copilot messages are either very small like track status messages
+// or very large if you have large playlists or album art files -- which doesn't aid Windows'
+// predictive algorithm.
+
+// For non blocking socket sends, which is what this code is set up for. If you send a very
+// large, say 3Mb message, you will see the system buffer up the whole message the first time
+// and return immediately -- the issue is right after, on the next send, even if it is a very
+// small message, the system will likely 'fail' with a WSAWOULDBLOCK and will continue to 'fail'
+// until the large buffer has either been fully sent or reduced below a certain threshold -- the
+// system will not expand the send buffer even a little at that point.
+
+// What I also found if you continued to 'jam' on the send socket during this time, there
+// were cases where the socket 'locked' up and never resumed. So in this new version of the code,
+// I've also added code to stop sending messages on the first occurrence of WSAWOULDBLOCK.
+// I also added code to then trigger on the FD_WRITE event, signaling that the socket is ready
+// to resume sending.
+
+// For this application, dropping some messages especially track info status messages is ok, 
+// since those status requests are sent constantly.
+
+// The send socket now doesn't lock up, but sometimes getting the FD_WRITE event from the
+// system seemed a little 'laggy' from when I could clearly see the album art file had been
+// transferred to the phone and was already displayed.
+
+// Hence why in the end, I also manually set the socket send buffer to 8MB, versus watching
+// Windows 'struggle' with trying to figure out a good buffer size. The 8MB provides ample
+// buffer space for larger album art files or playlist msgs. 
+
+// A worst case is where you are rapidly stepping thru a list of track titles, each with
+// a different album art file. With the 8MB buffer you can burst a series of large album art
+// files to it and have them all absorbed by the buffer without triggering a WSAWOULDBLOCK.
+
+// Doing this I get snappy performance with Foobar2000 Copilot.
+
+// Also to minimize taxing the socket send buffer, if you do have an album art file > the
+// the max size of the send buffer/3 currently set to 8MB, I skip sending it and return instead
+// the 'no cover art' message. The goal is to keep performance snappy.
+
+// sendData() - send data to clients
 bool
 controlserver::sendData(SOCKET clientSocket, pfc::string8 const& data)
 {
+	WSABUF wsaBuf; // Windows send buffer
     pfc::string8 cleanData;
+
+	if (m_Exiting) return false;  // exiting foobar2000 so exit
 
     if (!m_utf8Output)
     {
+		// convert unicode to ascii
         convertFromWide(data, cleanData);
+
+		wsaBuf.buf = (CHAR *)cleanData.get_ptr();
+		wsaBuf.len = strlen(cleanData.get_ptr());
+
     }
     else
     {
-        cleanData = data;
+		// leave as unicode
+		wsaBuf.buf = (CHAR *)data.get_ptr();
+		wsaBuf.len = strlen(data.get_ptr());
     }
 
-    if ((send(clientSocket, cleanData.get_ptr(), strlen(cleanData.get_ptr()), 0)) == SOCKET_ERROR)
-    {
+
+    if (CONSOLE_DEBUG)
+	{
+		pfc::string8 msg;
+		msg << "foo_controlserver: sendData size of buffer to send() = " << wsaBuf.len;
+		console::info(msg);
+	}
+
+	// If we 'failed' the last send with a WSAWOULDBLOCK, meaning the send buffer is full
+	// don't send any more data until the system says the send buffer can accept more data
+	// -- as indicated by the FD_WRITE event being triggered on the socket
+	if (!sendOK(clientSocket))
+	{
+	    if (CONSOLE_DEBUG)
+		{
+			pfc::string8 msg;
+			msg << "foo_controlserver: send() dropped msg : len =  " << wsaBuf.len;
+			console::info(msg);
+		}
+
+		return false;
+	}
+
+	// Some debug looking at socket send buffer size and size of send msgs (>20k)
+	// Adjust per your debug needs.
+	if (CONSOLE_DEBUG)
+	{
+		if (wsaBuf.len > 20000)
+		{
+			pfc::string8 msg;
+
+			// Size of send msg
+			msg << "foo_controlserver: sendData size of buffer to send() = " << wsaBuf.len << "\n";
+
+			// Get and display socket send buffer size
+			int sendbufsize;
+			int optlen = sizeof(sendbufsize);
+			int rc = getsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, (char *)&sendbufsize, &optlen);
+			if (rc != SOCKET_ERROR)
+			{
+				msg << "sys socket send bufsize = " << sendbufsize << "\n";
+			}
+			console::info(msg);
+		}
+	}
+
+	// Send buffer via socket
+	DWORD sentBytes = 0;
+	if (WSASend(clientSocket, &wsaBuf, 1, &sentBytes, 0, NULL, NULL) == SOCKET_ERROR)
+	{
         int lastError = WSAGetLastError();
         pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
 
         if (lastError != WSAEWOULDBLOCK)
         {
             pfc::string8 msg;
-
             msg << "foo_controlserver: error " << lastError << " on send() to client at " << clientAddress;
             console::info(msg);
 
             return false;
-        } else
+        } 
+		else
         {
-//            msg << "foo_controlserver: error " << lastError << " on send() to client at " << clientAddress;
-//            msg << " (WSAWOULDBLOCK non-critical";
-//            console::info(msg);
+			// Send 'failed' because send buffer is full
+			// Set flag to prevent any more sends until system triggers
+			// FD_WRITE event saying buffer ready to accept more msgs
 
+			// We could skip using the m_canSends flag, allowing the attempted sends to continue.
+			// In principle this should work, but what I found is if you keep jamming on the send
+			// while it isn't accepting any new msgs, sometimes it never recovers or resumes,
+			// versus toggling the sending with the FD_WRITE events
+
+			setSendFlag(clientSocket, false);
+
+			pfc::string8 msg;
+			msg << "foo_controlserver: warning " << lastError << " on send() to client at " << clientAddress;
+			msg << " (WSAWOULDBLOCK non-critical)";
+			console::info(msg);
+			
             return true;
         }
     }
 
     return true;
+}
+
+void controlserver::setSendFlag(SOCKET clientSocket, bool val)
+{
+	if (m_Exiting) return; // exiting foobar2000 so exit
+
+	// Fetch index of clientSocket in sockets list, use this index to access the 'canSends' list
+	// 'protect' resource for access
+	EnterCriticalSection(&cs);
+	for (int indx = 0; indx < m_vclientSockets.size(); indx++)
+	{
+		if (m_vclientSockets.at(indx) == clientSocket)
+		{
+			m_canSends.at(indx) = val;
+			break;
+		}
+	}
+	// release resource
+	LeaveCriticalSection(&cs);
+}
+
+bool
+controlserver::sendOK(SOCKET clientSocket)
+{
+	bool  sendFlag = false;
+
+	if (m_Exiting) return sendFlag; // exiting foobar2000 so exit
+
+	// Fetch index of clientSocket in sockets list, use this index to access the 'canSends' list
+	// 'protect' resource for access
+	EnterCriticalSection(&cs);
+	for (int indx = 0; indx < m_vclientSockets.size(); indx++)
+	{
+		if (m_vclientSockets.at(indx) == clientSocket)
+		{
+			sendFlag = m_canSends.at(indx);
+			break;
+		}
+	}
+
+	// release resource
+	LeaveCriticalSection(&cs);
+
+	return sendFlag;
+
 }
 
 // metafield in options was updated, update our copy
@@ -361,8 +529,9 @@ pfc::string8 controlserver::generateNowPlayingTrackString()
 	return str;
 }
 
-// mod playlist # pos if not found use -1 -1 rest correct, copilot if it sees -1 -1 knows not in
-// playlist
+// mod playlist # pos if not found use -1 (+1 wraps to negative number)
+// copilot if it sees -1 knows track not in playlist
+
 // song updated, notify a single client
 void
 controlserver::handleTrackUpdateOnConnect(SOCKET clientSocket)
@@ -486,6 +655,13 @@ controlserver::handleTrackUpdateFromPtr(metadb_handle_ptr p_track)
             sendData(m_vclientSockets.at(j), sendStr);
         }
     }
+
+	if (CONSOLE_DEBUG)
+	{
+		pfc::string8 msg;
+		msg << "foo_controlserver: handleTrackUpdateFromPtr issued a trackinfo command";
+		console::info(msg);
+	}
 }
 
 bool
@@ -729,14 +905,14 @@ controlserver::handleQueueTrackCommand(SOCKET clientSocket, pfc::string8 recvCom
 void controlserver::handleLibSearchCommand(SOCKET clientSocket, pfc::string8 recvCommand)
 {
 	// Command form : libsearch 'playlist name' 'string'
-	// strings are quoted since can have spaces
+	// strings are quoted since they can have spaces
 
 	// Build libsearch response msg 
 	// "500|playlist number with results|matched count"
 
 	// After receiving this response msg, you will need
 	// to refresh your list of playlists and redownload
-	// the 'library query' playlist
+	// the 'library query' playlist or whatever you called this playlist
 
 	pfc::string8 msg;
 	pfc::string8 playlistName;
@@ -919,17 +1095,18 @@ bool controlserver::readImageFile(char *img, unsigned char *buf)
 	return true;
 }
 
-void controlserver::retrieveAlbumArt(albumart &art_out)
+void controlserver::retrieveAlbumArt(albumArt &art_out)
 {
 	static_api_ptr_t<playback_control_v2> pc;
 	metadb_handle_ptr pb_track_ptr;
 
 	art_out.reset();
+	art_out.timeStampTicks = GetTickCount(); // timestamp request time, not used currently
 
 	pc->get_now_playing(pb_track_ptr);
 	if (pb_track_ptr == NULL)
 	{
-		art_out.pb_albumart_status = albumart::AS_NO_INFO;
+		art_out.pb_albumart_status = albumArt::AS_NO_INFO;
 		if (CONSOLE_DEBUG)
 		{
 			pfc::string8 msg;
@@ -940,7 +1117,7 @@ void controlserver::retrieveAlbumArt(albumart &art_out)
 		return;
 	}
 
-	art_out.pb_albumart_status = albumart::AS_NOT_FOUND;
+	art_out.pb_albumart_status = albumArt::AS_NOT_FOUND;
 
 	// extract track title for now playing track
 	pfc::string8 title;
@@ -963,11 +1140,11 @@ void controlserver::retrieveAlbumArt(albumart &art_out)
 	metadb_handle_list tracks;
 	tracks.add_item(pb_track_ptr);
 
-	// Foobar2000 do album art search using settings defined under :
-	// Files>Preferences>Advanced>Display>Album Art
-	// So either a picture file or embedded album art. 
-	// If an external file, it will look for jpg or png files named "folder", "cover", "front", 
-	// "artist name".
+	// Foobar2000 do album art lookup using settings defined under :
+	// Files>Preferences>Display and Files>Preferences>Advanced>Display>Album art
+	// So either image file or embedded album art. 
+	// If an external file, Foobar2000 will look for jpg files named "folder", "cover",
+	// "front", "album", "filename" by default.
 
 	static_api_ptr_t<album_art_manager_v3> aam;
 	abort_callback_dummy abortCallback;
@@ -992,27 +1169,62 @@ void controlserver::retrieveAlbumArt(albumart &art_out)
 
 	if (found)
 	{
-		art_out.pb_albumart_status = albumart::AS_FOUND;
-
 		if (art_ptr.is_valid())
 		{
-			art_out.size = art_ptr->get_size();
+			art_out.imageSize = art_ptr->get_size();
+
 			if (CONSOLE_DEBUG)
 			{
 				pfc::string8 msg;
-				msg << "found embedded art : size = " << art_out.size;
+				msg << "found embedded art : imageSize = " << art_out.imageSize;
 				msg << " title=" << art_out.trackTitle;
 				msg << " album=" << art_out.albumTitle;
 				console::info(msg);
 			}
 
-			// Buffer contains contents of image file
-			unsigned char *buffer = new unsigned char[art_out.size];
-			memcpy((void *)buffer, (void *)art_ptr->get_ptr(), art_out.size);
+			// Check if size of image art > m_maxImageSize (1.5MB)  -- if so, skip sending the album art
+			// since performance can degrade badly on the phone app-- see more comments about this in SendData()
 
-			// Convert image to base64 for transfer to client
-			base64_encode(art_out.base64string, (const void *)buffer, art_out.size);
+			// We have the socket buffer size set large (8MB), so we should have plenty of headroom -- what we don't
+			// want is to 'block' on the 'send', or performance can degrade
 
+			// Optionally in the future, we might auto scale the image down if too large here...but that
+			// would also depend on the compute times needed to do the convert...
+
+			// Some users may have large (multi megabyte) album art files -- that may be fine on a PC but
+			// having to constantly transfer and render that on a small screened phone can badly degrade performance,
+			// especially if the user is quickly stepping thru a list of tracks each with a different album art image
+
+			if (art_out.imageSize < (int)(m_maxImageSizeMB * m_BytesInMB))
+			{
+				art_out.pb_albumart_status = albumArt::AS_FOUND;
+
+				// Some debug - write album art image buffer from foobar2000 out to a jpg file
+				// Confirms it is in fact an image -- assumes you can write to c:\temp folder,
+				// if not, change accordingly
+				if (false)
+				{
+					writeImageFile("c:\\temp\\album_art_image.jpg", (unsigned char *)art_ptr->get_ptr(), art_out.imageSize);
+				}
+
+				// Convert binary image to base64 text for transfer to client
+				// The base64size can be like 1.5x larger than the original image size
+				if (art_out.imageSize > 0)
+				{
+					base64_encode(art_out.base64String, (const void *)art_ptr->get_ptr(), art_out.imageSize);
+							
+					art_out.base64Size = art_out.base64String.get_length();
+				}
+			}
+			else
+			{
+				pfc::string8 msg;
+				msg << "foo_controlserver: album art size: " << art_out.imageSize/ (double)m_BytesInMB << " MB > " << m_maxImageSizeMB << " MB : too large, not sending \n";
+			    msg << "track=[" << art_out.trackTitle << "] album=[" << art_out.albumTitle << "]";
+				console::warning(msg);
+
+				art_out.imageSize = 0;
+			}
 		}
 	}
 	else
@@ -1398,8 +1610,8 @@ controlserver::handleVolumeSetCommand(SOCKET clientSocket, pfc::string8 recvComm
 
 	if (CONSOLE_DEBUG)
 	{
-		//msg << "foo_controlserver: client from " << clientAddress << " issued a volume command";
-		//console::info(msg);
+		msg << "foo_controlserver: client from " << clientAddress << " issued a volume command";
+		console::info(msg);
 	}
     while (f != NULL)
     {
@@ -2123,45 +2335,72 @@ controlserver::handleAlbumArtCommand(SOCKET clientSocket)
 	pfc::string8 msg;
 	pfc::string8 sendStr;
 	pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
+	albumArt albumArt;
 
-	// fetches album art for 'now playing' track from foobar2000.
-	// Embeds jpg, png, etc file into return datastream
-	// as a base64 text string.
-	// Response is sent back as a 2 part message, see below for details
-
+	// Fetches album art for 'now playing' track from foobar2000.
+	// Embeds jpg or png file into return datastream
+	// as a base64 string. We convert the binary of the image
+	// to base64 text since our datastream is all character based 
+	// and the binary chars could mess up the message
+	// parsing.
+	// 
+	// Converting to base64 can take about 1.5x more space 
+	// versus the original image size. So a 200k image file might end
+	// up 300K as base64 -- taxing the socket send buffers more, especially
+	// if your have huge multi- megabyte album art images.
+	//
 	if (CONSOLE_DEBUG)
 	{
 		msg << "foo_controlserver: client from " << clientAddress << " issued an albumart command";
 		console::info(msg);
 	}
 
-	retrieveAlbumArt(m_albumart);
+	retrieveAlbumArt(albumArt);
 
-	int base64Length = m_albumart.base64string.get_length();
-	if (m_albumart.pb_albumart_status == albumart::AS_NOT_FOUND ||
-		m_albumart.pb_albumart_status == albumart::AS_NO_INFO)
+	if (albumArt.pb_albumart_status == albumArt::AS_NOT_FOUND ||
+		albumArt.pb_albumart_status == albumArt::AS_NO_INFO)
 	{
 		// No album art found
-		m_albumart.numBlocks = -1;
-		m_albumart.size = 0;
+		if (albumArt.trackTitle.get_length() == 0) return;  // in state of transition, no trackTitle yet so skip
+
+		albumArt.numBlocks = -1;
+		albumArt.imageSize = 0;
 	}
 	else
 	{
-		// If there is album art, send it in one message block as base.
-		// Image content is the raw bits of the jpg or png file
-		m_albumart.numBlocks = 1;
+		// If there is album art, send it in one base64 message block.
+		albumArt.numBlocks = 1;
 	}
 
-	// Send 2 part album art response
-	// 700|numBlocks|base64Length|size of album art image file|trackTitle|albumTitle|
-	// 701|numBlocks|base64string of image|
+	// Send album art response. Takes 1 of 2 forms:
+	
+	// 1) If there is a valid album art file (2 msgs sent back):
+	
+	// 700|numBlocks|base64Length|size of original album image file|trackTitle|albumTitle|
+	// 701|numBlocks|base64string of image|    <-- 2nd msg
+	//
 	// numBlocks = -1 if no image file, else always 1 (one block)
-	// image file is transferred as a base64 string
-	sendStr << "700" << m_delimit << m_albumart.numBlocks << m_delimit << base64Length << m_delimit << m_albumart.size << m_delimit << m_albumart.trackTitle << m_delimit << m_albumart.albumTitle << m_delimit << "\r\n";
-    sendStr << "701" << m_delimit << m_albumart.numBlocks << m_delimit << m_albumart.base64string << m_delimit << "\r\n";
+	// image file is transferred as a base64 string -- this string can be 1.5 x size of original binary image file
 
-	// send the response
-	sendData(clientSocket, sendStr);
+	// Once transferred and you have converted the base64 string back to binary, you can compare its converted size
+	// to the image's original size -- they should match if the transfer was successful
+
+	// 2) If no album art file or image file exceeds max size (and so is skipped)
+	//    -- one msg sent back
+	
+	// 700|-1|0|0|trackTitle|albumTitle|
+
+	sendStr << "700" << m_delimit << albumArt.numBlocks << m_delimit << albumArt.base64Size << m_delimit << albumArt.imageSize << m_delimit << albumArt.trackTitle << m_delimit << albumArt.albumTitle << m_delimit << "\r\n";
+	
+	if (albumArt.numBlocks == 1)
+	{
+		// There is album art, so construct 2nd msg -- base64 text of image contents
+		sendStr << "701" << m_delimit << albumArt.numBlocks << m_delimit << albumArt.base64String << m_delimit << "\r\n";
+	}
+
+    // Send the album art msg
+    sendData(clientSocket, sendStr);
+
 }
 
 
@@ -2481,6 +2720,7 @@ controlserver::handleTrackInfoCommand(SOCKET clientSocket)
 		//msg << "foo_controlserver: client from " << clientAddress << " issued a trackinfo command";
 		//console::info(msg);
 	}
+
 	t_size pb_item = pfc::infinite_size;
 	t_size pb_playlist = pfc::infinite_size;
 
@@ -2542,12 +2782,20 @@ WINAPI controlserver::ClientThread(void* cs)
     WSAEVENT events[2];
     WSANETWORKEVENTS networkEvents;
     int rcode = 0;
-    int bytesRecv = 0;
     pfc::string8 recvCommand;
     pfc::string8 clientAddress = calculateSocketAddress(clientSocket);
     static_api_ptr_t<main_thread_callback_manager> cm;
 
+	DWORD bytesRecv = 0;
+	DWORD readFlags = 0;
+
+	WSABUF  wsaBuf;
+	wsaBuf.buf = dataBuf;
+	wsaBuf.len = m_bufferSize;
+
     memset(dataBuf, 0, sizeof(dataBuf));
+
+	if(m_Exiting) return 0;  // exiting foobar2000 so exit
 
     // create event
     if((event = WSACreateEvent()) == NULL)
@@ -2564,7 +2812,7 @@ WINAPI controlserver::ClientThread(void* cs)
     events[1] = m_WSAendEvent;
 
     // select the events we want to monitor
-    if ((WSAEventSelect(clientSocket, event, FD_READ|FD_CLOSE)) == SOCKET_ERROR)
+    if ((WSAEventSelect(clientSocket, event, FD_READ|FD_WRITE|FD_CLOSE)) == SOCKET_ERROR)
     {
 		pfc::string8 msg;
 		msg << "foo_controlserver: error " << WSAGetLastError() << " on client from " << clientAddress;
@@ -2575,6 +2823,24 @@ WINAPI controlserver::ClientThread(void* cs)
 
         return 0;
     }
+
+	// See 'sendData' routine for more explanation of why I'm manually setting a large
+	// send buffer vs letting Windows variably set it -- the underlying code supports not
+	// setting this, but I found the performance with Foobar2000 Copilot can be laggy with 
+	// larger album art files, or very large playlist files being constantly sent -- setting
+	// this buffer manually to a value larger (with plenty of head room) than any data block 
+	// we could expect -- we get good performance. Instead of trying to let Windows guess or
+	// predict what buffer sizes we are working with, we know that and are better off setting it
+	// manually
+	
+	int optlen = sizeof(m_socketBufferSize);
+	int rc = setsockopt(clientSocket, SOL_SOCKET, SO_SNDBUF, (char *)&m_socketBufferSize, optlen);
+	if (rc == SOCKET_ERROR)
+	{
+		pfc::string8 msg;
+		msg << "foo_controlserver: error - socket set buffer size failed on client from " << clientAddress;
+		console::warning(msg);
+	}
 
     // force update of track to this client only on connect
     cm->add_callback(new service_impl_t<CHandleCallbackRun>(CHandleCallbackRun::trackupdateonconnect, clientSocket));
@@ -2598,7 +2864,7 @@ WINAPI controlserver::ClientThread(void* cs)
             break;
         } // end of if
 
-        // check for timeout on wait, this is not an error if this occures, just continue on
+        // check for timeout on wait, this is not an error if this occurs, just continue on
         if (rcode == WSA_WAIT_TIMEOUT)
         {
             continue;
@@ -2623,15 +2889,56 @@ WINAPI controlserver::ClientThread(void* cs)
                 // see if there was an error on the close event
                 if (networkEvents.iErrorCode[FD_CLOSE_BIT] != 0)
                 {
-					pfc::string8 msg;
-					msg << "foo_controlserver: error " << networkEvents.iErrorCode[FD_CLOSE_BIT] << " on client from " << clientAddress;
-					msg << " FD_CLOSE";
-					console::warning(msg);
+					if (CONSOLE_DEBUG)
+					{
+						pfc::string8 msg;
+						msg << "foo_controlserver: error " << networkEvents.iErrorCode[FD_CLOSE_BIT] << " on client from " << clientAddress;
+						msg << " FD_CLOSE";
+						console::warning(msg);
+					}
                 }
 
                 // break out so exit can happen
                 break;
             }
+
+			// check for a write event
+			if (networkEvents.lNetworkEvents & FD_WRITE)
+			{
+				// see if there was an error on the write event
+				if (networkEvents.iErrorCode[FD_WRITE_BIT] != 0)
+				{
+					pfc::string8 msg;
+					msg << "foo_controlserver: error " << networkEvents.iErrorCode[FD_WRITE_BIT] << " on client from " << clientAddress;
+					msg << " FD_WRITE";
+					console::warning(msg);
+
+					break;
+				}
+
+				if (CONSOLE_DEBUG)
+				{
+					pfc::string8 msg;
+					msg << "foo_controlserver: FD_WRITE event triggered on client from " << clientAddress;
+					console::info(msg);
+				}
+
+				// Reset 'can send' flag after 'failing' on a prior send 
+				// with WSAWOULDBLOCK
+
+				// This tells sendData() it can resume sending.
+				setSendFlag(clientSocket, true);
+
+				bool bRc= WSAResetEvent(event);
+				if (!bRc)
+				{
+					pfc::string8 msg;
+					msg << "foo_controlserver: reset event error " << WSAGetLastError() << " on client from " << clientAddress;
+					console::warning(msg);
+				}
+			
+				continue;
+			}
 
             // check for a read event
             if (networkEvents.lNetworkEvents & FD_READ)
@@ -2651,27 +2958,33 @@ WINAPI controlserver::ClientThread(void* cs)
                 // clear buffer from previous time
                 memset(dataBuf, 0, sizeof(dataBuf));
 
-                // receive the data
-                if ((bytesRecv = recv(clientSocket, dataBuf, sizeof(dataBuf), 0)) == SOCKET_ERROR)
-                {
+				// Read the data into the read buffer
+				readFlags = 0;
+				bytesRecv = 0;
+				if (WSARecv(clientSocket, &wsaBuf, 1, &bytesRecv, &readFlags, NULL, NULL) == SOCKET_ERROR)
+				{
                     int lastError = WSAGetLastError();
 
                     if (lastError != WSAEWOULDBLOCK)
                     {
-						pfc::string8 msg;
-						msg << "foo_controlserver: error " << WSAGetLastError();
-						msg << " on recv() on client from " << clientAddress;
-						console::warning(msg);
-						
+						if (CONSOLE_DEBUG)
+						{
+							pfc::string8 msg;
+							msg << "foo_controlserver: error " << WSAGetLastError();
+							msg << " on recv() on client from " << clientAddress;
+							console::warning(msg);
+						}
                         break;
-                    } else
+                    } 
+					else
                     {
-//                        pfc::string8 msg;
-
-//                        msg << "foo_controlserver: error " << WSAGetLastError();
-//                        msg << " on recv() on client from " << clientAddress << "(WSAEWOULDBLOCK non-critical)";
-//                        console::warning(msg);
-
+						if (CONSOLE_DEBUG)
+						{
+							pfc::string8 msg;
+							msg << "foo_controlserver: error " << WSAGetLastError();
+							msg << " on recv() on client from " << clientAddress << "(WSAEWOULDBLOCK non-critical)";
+							console::warning(msg);
+						}
                         continue;
                     }
                 }
@@ -2886,20 +3199,36 @@ controlserver::shutdownClient(SOCKET clientSocket)
 {
     char dataBuf[m_bufferSize];
     pfc::string8 clientAddress(calculateSocketAddress(clientSocket));
+	DWORD bytesRecv = 0;
+	DWORD readFlags = 0;
+
+	WSABUF  wsaBuf;
+	wsaBuf.buf = dataBuf;
+	wsaBuf.len = m_bufferSize;
+
+	memset(dataBuf, 0, sizeof(dataBuf));
 
 	pfc::string8 msg;
 	msg << "foo_controlserver: client from " << clientAddress << " disconnected";
 	console::info(msg);
 
-    std::vector<SOCKET>::iterator it;
-    for (it=m_vclientSockets.begin(); it!= m_vclientSockets.end(); it++)
-    {
-        if (*it == clientSocket)
-        {
-            m_vclientSockets.erase(it);
-            break;
-        }
-    }
+	// Fetch index of clientSocket in sockets list, use this index to access 
+	// the 'canSends' list
+	// protect resources for access
+	EnterCriticalSection(&cs);
+	for (int indx = 0; indx<m_vclientSockets.size(); indx++)
+	{
+		if (m_vclientSockets.at(indx) == clientSocket)
+		{
+			m_vclientSockets.erase(m_vclientSockets.begin() + indx);
+			m_canSends.erase(m_canSends.begin() + indx);
+
+			break;
+
+		}
+	}
+	// release resource
+	LeaveCriticalSection(&cs);
 
     if (clientSocket != INVALID_SOCKET)
     {
@@ -2912,13 +3241,18 @@ controlserver::shutdownClient(SOCKET clientSocket)
 			console::warning(msg);	
         }
 
-        if (recv(clientSocket, dataBuf, sizeof(dataBuf), 0) == SOCKET_ERROR)
+		readFlags = 0;
+		bytesRecv = 0;
+		if (WSARecv(clientSocket, &wsaBuf, 1, &bytesRecv, &readFlags, NULL, NULL) == SOCKET_ERROR)
         {
-				//            pfc::string8 msg;
-				//   we will get a WSAESHUTDOWN
-				//            msg << "foo_controlserver: error " << WSAGetLastError() << " on recv() on client ";
-				//            msg << clientAddress;
-				//            console::warning(msg);
+			if (CONSOLE_DEBUG)
+			{
+				pfc::string8 msg;
+				//  We will get a WSAESHUTDOWN
+				msg << "foo_controlserver: error " << WSAGetLastError() << " on recv() on client ";
+				msg << clientAddress;
+				console::warning(msg);
+			}
         }
 
         if (closesocket(clientSocket) == SOCKET_ERROR)
@@ -3129,7 +3463,7 @@ controlserver::start(int port, HANDLE endEvent)
 {
     WSADATA wsd;
     SOCKET sListen;     // socket we are going to listen for connections on
-    SOCKET sClient;     // socket we are giving the client if accept it
+    SOCKET sClient;     // socket we are giving the client on accept
     SOCKADDR_IN client;
     SOCKADDR_IN local;
     WSAEVENT hEvent;
@@ -3139,6 +3473,15 @@ controlserver::start(int port, HANDLE endEvent)
     int nRet = 0;
     char dataBuf[m_bufferSize];
     static_api_ptr_t<main_thread_callback_manager> cm;
+
+	DWORD bytesRecv = 0;
+	DWORD readFlags = 0;
+
+	WSABUF  wsaBuf;
+	wsaBuf.buf = dataBuf;
+	wsaBuf.len = m_bufferSize;
+
+	memset(dataBuf, 0, sizeof(dataBuf));
 
     // start up winsock
     if (WSAStartup(MAKEWORD(2,2), &wsd) != 0)
@@ -3151,7 +3494,7 @@ controlserver::start(int port, HANDLE endEvent)
         return;
     }
 
-    // make sure version is ok
+    // make sure winsock lib version is ok
     if (wsd.wVersion != MAKEWORD(2, 2))
     {
         console::warning("foo_controlserver: could not find the requested winsock version");
@@ -3159,7 +3502,7 @@ controlserver::start(int port, HANDLE endEvent)
         return;
     }
 
-    // create out listening socket
+    // create our listening socket
     sListen = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_IP, NULL, 0, NULL);
     if (sListen == INVALID_SOCKET)
     {
@@ -3330,6 +3673,8 @@ controlserver::start(int port, HANDLE endEvent)
                 pfc::string8 msg;
                 pfc::string8 sendStr;
 
+				if (m_Exiting) break;  // exiting foobar2000 so exit
+
                 int iAddrSize = sizeof(client);
 
                 sClient = WSAAccept(sListen, reinterpret_cast<SOCKADDR*>(&client), &iAddrSize, NULL, NULL);
@@ -3360,13 +3705,16 @@ controlserver::start(int port, HANDLE endEvent)
                         console::warning(msg);
                     }
 
-                    if (recv(sClient, dataBuf, sizeof(dataBuf), 0) == SOCKET_ERROR)
-                    {
+					// Read the data into the read buffer
+					readFlags = 0;
+					bytesRecv = 0;
+					if (WSARecv(sClient, &wsaBuf, 1, &bytesRecv, &readFlags, NULL, NULL) == SOCKET_ERROR)
+					{
                         // we will get WSAESHUTDOWN
-//                        pfc::string8 msg;
+                        pfc::string8 msg;
 
-//                        msg << "foo_controlserver: error " << WSAGetLastError() << " on server recv()";
-//                        console::warning(msg);
+                        msg << "foo_controlserver: error " << WSAGetLastError() << " on server recv()";
+                        console::warning(msg);
                     }
 
                     if (closesocket(sClient) == SOCKET_ERROR)
@@ -3380,55 +3728,49 @@ controlserver::start(int port, HANDLE endEvent)
                     continue;
                 }
 
+
+				// Augmented vclientSockets list with parallel list of 'canSend' flags
+				// -- these 'line up' -- so the position 0 sClient
+				// uses position 0 of the canSend list
+
+				EnterCriticalSection(&cs);
+
+					// Sockets list of connected clients
+					m_vclientSockets.push_back(sClient);
+				
+					// Can we send on the client socket
+					bool canSend = new bool(true);
+					m_canSends.push_back(canSend);
+
+				LeaveCriticalSection(&cs);
+
                 sendStr << "999" << m_delimit << "Connected to foobar2000 Control Server " <<
                             m_versionNumber << m_delimit << "\r\n" <<
                        "999" << m_delimit << "Accepted client from " << inet_ntoa(client.sin_addr) <<
                             m_delimit << "\r\n" <<
-                       "999" << m_delimit << "There are currently " << m_vclientSockets.size()+1 << "/" <<
+                       "999" << m_delimit << "There are currently " << m_vclientSockets.size() << "/" <<
                             m_maxClients << " clients connected" << m_delimit << "\r\n";
 
 
                 msg << "foo_controlserver: accepted client from " << inet_ntoa(client.sin_addr) << "\r\n";
                 console::info(msg);
 
-                if (m_vclientSockets.size()+1 > m_maxClients)
+				// check if server list full
+                if (m_vclientSockets.size() > m_maxClients)
                 {
                     pfc::string8 msg;
 
                     sendStr << "999" << m_delimit << "The server is full. Try again later." << m_delimit << "\r\n";
 
-                    msg << "foo_controlserver: rejected client from " << inet_ntoa(client.sin_addr) << "; the server is full.";
+                    msg << "foo_controlserver: rejected client from " << inet_ntoa(client.sin_addr) << " -- the server is full : max clients = " << m_maxClients;
                     console::info(msg);
 
                     sendData(sClient, sendStr);
 
-                    //send and receive FIN packets
-                    if (shutdown(sClient, 2) == SOCKET_ERROR)
-                    {
-                        pfc::string8 msg;
+					shutdownClient(sClient);
 
-                        msg << "foo_controlserver: error " << WSAGetLastError() << " on server shutdown()";
-                        console::warning(msg);
-                    }
+					continue;
 
-                    if (recv(sClient, dataBuf, sizeof(dataBuf), 0) == SOCKET_ERROR)
-                    {
-                        // we will get WSAESHUTDOWN
-//                        pfc::string8 msg;
-
-//                        msg << "foo_controlserver: error " << WSAGetLastError() << " on server recv()";
-//                        console::warning(msg);
-                    }
-
-                    if (closesocket(sClient) == SOCKET_ERROR)
-                    {
-                        pfc::string8 msg;
-
-                        msg << "foo_controlserver: error " << WSAGetLastError() << " on server closesocket()";
-                        console::warning(msg);
-                    }
-
-                    continue;
                 }
                 else
                 {
@@ -3447,7 +3789,6 @@ controlserver::start(int port, HANDLE endEvent)
                     break;
                 }
 
-                m_vclientSockets.push_back(sClient);
             }
         }
     }

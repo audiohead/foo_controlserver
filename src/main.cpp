@@ -19,10 +19,15 @@
  */
 
 /*
- * Version 1.1.4 Sept 2017 - Walter Hartman
+ * Version 1.1.5 Dec 2017 - Walter Hartman
+ *   - Updates to socket message sending due to potential performance issues
+ *     for larger album art images and playlist msgs
+ *     See detailed code comments in 'controlserver.cpp'
+ *
+ * Version 1.1.4 Oct 2017 - Walter Hartman
  *   - Added track title and album title to 'now playing' album art image response
  *
- * Version 1.1.3 Nov 2016 - Walter Hartman
+ * Version 1.1.3 Sept 2017 - Walter Hartman
  *   - Rebuilt using VS2015 Community and the new foobar2000 SDK version 2015-08-03
  *   - Updated the preferences dialog to use the new foobar2000 API's
  *   - Added IP address display of local PC to preferences dialog
@@ -246,10 +251,11 @@ public:
 
 DECLARE_CLASS_GUID(play_callback_controlserver, 0xff3eb8d7, 0x97dd, 0x48b3, 0x80, 0xae, 0x15, 0x5b, 0x00, 0x99, 0x0c, 0x6d);
 
-// used on intializtion of foobar to initalize plugin
+// used on initialization of foobar to initialize plugin
 // we create the server thread with this and kill it on close
 class initquit_controlserver : public initquit
 {
+
 private:
     static HANDLE h_thread;
     static HANDLE endEvent;
@@ -284,8 +290,13 @@ private:
     };
 
 public:
+
     static void do_init()
     {
+		controlserver::m_Exiting = false;
+
+		InitializeCriticalSection(&controlserver::cs);
+
         // create end event
         endEvent =  CreateEvent(NULL, TRUE, FALSE, NULL);
 
@@ -302,14 +313,20 @@ public:
         // to handle connections to the server
         create_thread(endEvent);
     };
+
     static void do_quit()
     {
+		controlserver::m_Exiting = true;
+
         controlserver::m_currTrackPtr.release();
         controlserver::m_prevTrackPtr.release();
 
         // create event to stop the init
         SetEvent(endEvent);
         stop_thread();
+
+		DeleteCriticalSection(&controlserver::cs);
+
     };
     virtual void on_init()
     {
@@ -603,22 +620,30 @@ DECLARE_COMPONENT_VERSION("Control Server", controlserver::m_versionNumber,
 "along with this program; if not, write to the Free Software\n"
 "Foundation, Inc., 51 Franklin Street, Ste 500, Boston, MA 02110-1301, USA.\n"
 "\n"
-"September 2017 Updated Version 1.1.4 :  Walter Hartman\n"
+"This foo_controlserver.zip component (and full source code) is available at:\n"
+"\n"
+"https://github.com/audiohead/foo_controlserver/releases"
+"\n\n"
+"December 2017 Version 1.1.5 : Walter Hartman\n"
+"\n"
+"- Updated socket message sending due to potential performance issues,\n"
+"optimized code for larger album art and playlist msgs\n"
+"\n"
+"October 2017 Version 1.1.4 : Walter Hartman\n"
 "\n"
 "- Added track title and album title to 'now playing' album art msg response\n"
 "\n"
-"November 2016 Updated Version 1.1.3 :  Walter Hartman\n"
+"September 2017 Version 1.1.3 :  Walter Hartman\n"
 "\n"
-"This updated version, along with its full source code, is released\n"
-"as free software and under the same terms, listed above, as the\n"
-"original.\n"
-"\n"
-"Updates include album art retrieval, media library search, use of the\n"
+"- Updates include album art retrieval, media library search, use of the\n"
 "newer SDK-2015-08-03 API's for the preferences screen, display\n"
 "of the local PC IP.\n"
 "\n"
-"This foo_controlserver.zip component (and full source code) is available at:\n"
 "\n"
-"https://github.com/audiohead/foo_controlserver/releases \n");
+"These updated versions, along with full source code, are released\n"
+"as free software and under the same terms, listed above, as the\n"
+"original.\n"
+"\n"
+);
 						  
 

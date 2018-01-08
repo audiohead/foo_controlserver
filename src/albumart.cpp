@@ -1,24 +1,29 @@
 /*
-* Nov 2016 - added this file for new album art function - Walter Hartman
+* Sept 2017 - added this file for new album art function - Walter Hartman
 */
 
 #include "albumart.h"
 
-albumart::albumart()
+albumArt::albumArt()
 {
 	reset();
 }
 
-albumart::~albumart()
+albumArt::~albumArt()
 {
 }
 
 
-void albumart::reset(void)
+void albumArt::reset(void)
 {
 	numBlocks = 0;
-	size = 0;
+	imageSize = 0;
+	base64Size = 0;
+	pb_albumart_status = AS_NO_INFO;
+
+	timeStampTicks = 0;
 
 	trackTitle.reset();
-	base64string.reset();
+	albumTitle.reset();
+	base64String.reset();
 }

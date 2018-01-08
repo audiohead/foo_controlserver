@@ -17,7 +17,9 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Ste 500, Boston, MA 02110-1301, USA.
  *
- * Nov 2016 - added album art, library search functions - Walter Hartman
+ * Dec 2017 - updates to socket msg sending - Walter Hartman
+ *
+ * Sept 2017 - added album art, library search functions - Walter Hartman
  *
  */
 
@@ -36,6 +38,7 @@ class controlserver
 {
 public:
     static std::vector<SOCKET> m_vclientSockets;
+	static std::vector<bool> m_canSends;
     static HANDLE m_WSAendEvent;
     static unsigned int const m_bufferSize;
     static bool m_muted;
@@ -48,15 +51,18 @@ public:
     static t_size m_currPlaylistIndex;
     static metadb_handle_ptr m_currTrackPtr;
     static metadb_handle_ptr m_prevTrackPtr;
-	static albumart m_albumart;
+	static int const m_socketBufferSize;
+	static double const m_maxImageSizeMB;
+	static int const m_BytesInMB;
+	static bool m_Exiting;
+	static CRITICAL_SECTION cs;
 
     controlserver();
     ~controlserver();
 
     static void handleVolumeSetCommand(SOCKET, pfc::string8);
     static void handleListCommand(SOCKET, pfc::string8);
-	static void retrieveAlbumArt(albumart& out);
-	//static BitmapImage ImageFromBuffer(Byte[] bytes);
+	static void retrieveAlbumArt(albumArt& out);
 	static void handleNextCommand(SOCKET, pfc::string8);
     static void handlePrevCommand(SOCKET, pfc::string8);
     static void handleStopCommand(SOCKET);
@@ -93,6 +99,9 @@ public:
     static bool convertFromWide(pfc::string8 const&, pfc::string8&);
 	static pfc::string8 controlserver::generateNowPlayingTrackString();
 
+	static bool sendOK(SOCKET);
+	static void setSendFlag(SOCKET, bool);
+
 private:
     static t_size m_utf8Output;
     static t_size m_preventClose;
@@ -106,7 +115,7 @@ private:
     static bool sendData(SOCKET, pfc::string8 const&);
     static bool validateConnectionMask(SOCKADDR_IN);
     static bool validateFuzzyMatch(pfc::string8, pfc::string8);
-	
+
 };
 
 #endif  // INC_CONTROLSERVER_H
