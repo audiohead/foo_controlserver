@@ -39,6 +39,12 @@ The foo_controlserver plug-in was originally developed by Jason Poloski,
 who released it into the public domain. See his original GPL license document
 in the archive.
 
+foo_controlserver is validated to run on Windows 7 and above. It does not currently
+run on Windows XP.  If you are running Windows XP, you can still run the v1.0.2 version, 
+which is also available under Releases -- just click on the foo_controlserver.zip link
+under Assets for that version. That older version, however, does not do library searches
+and album art.
+
 ------------------------------------------------------------
 
 VERSION HISTORY:
